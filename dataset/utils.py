@@ -434,88 +434,165 @@ def process_directory_tree(input_dir, output_dir, checkpoint_file, n_workers=4, 
 
 def process_file(file_path):
     """
-    Process a single npz file: load its 'crop' and 'patches' arrays,
-    reshape the patches (flattening the first three dimensions),
-    and return the file name along with the processed arrays.
+    Load a single npz file and process its data.
+    - crops is assumed to have shape (n, 2048, 2048)
+    - patches is assumed to have shape (8,8,C,256,256) with C=1 or 2,
+      and is reshaped to (-1, 256, 256)
     """
     data = np.load(file_path)
-    crops = data['crop']  # Expected shape: (n, 2048, 2048)
-    patches = data['patches']  # Expected shape: (8,8,C,256,256) where C is 1 or 2
+    crops = data['crop']  # e.g. (2, 2048, 2048) or (1, 2048, 2048)
+    patches = data['patches']  # e.g. (8,8,C,256,256)
     patches_reshaped = patches.reshape(-1, patches.shape[-2], patches.shape[-1])
     return file_path, crops, patches_reshaped
 
-def process_npz_files_parallel(folder_path, 
-                               crops_filename='crops.pt', 
-                               patches_filename='patches.pt', 
-                               checkpoint_filename='checkpoint.txt'):
+def get_next_chunk_index(folder_path, crops_prefix='crops_', ext='.pt'):
     """
-    Process all .npz files in a folder in parallel while maintaining a checkpoint.
+    Determine the next available chunk index by listing files that start with crops_
+    (e.g. crops_1.pt, crops_2.pt, …) and returning the next index.
+    """
+    existing = [f for f in os.listdir(folder_path) if f.startswith(crops_prefix) and f.endswith(ext)]
+    indices = []
+    for fname in existing:
+        try:
+            idx = int(fname[len(crops_prefix):-len(ext)])
+            indices.append(idx)
+        except ValueError:
+            pass
+    return max(indices) + 1 if indices else 1
+
+def process_npz_files_progressive(folder_path, 
+                                  files_per_chunk=5,
+                                  crops_partial_name='crops_partial.pt',
+                                  patches_partial_name='patches_partial.pt',
+                                  checkpoint_filename='checkpoint.txt'):
+    """
+    Process all npz files in folder_path in parallel, but only accumulate
+    data from a fixed number of files (files_per_chunk) in memory at once.
     
-    - A checkpoint file (a text file) is used to record processed files.
-    - If crops.pt and patches.pt exist, they are loaded to resume accumulation.
-    - Files already processed (as recorded in the checkpoint) are skipped.
-    - After processing each file, the new data is concatenated with the existing data,
-      and the tensors are saved.
+    For each chunk:
+      - The accumulated crops are concatenated (along the first axis) and saved as a chunk file.
+      - The same is done for patches.
+      
+    A checkpoint file is maintained that stores the names of already-processed files.
+    Additionally, after each file the current partial (incomplete chunk) is saved to disk,
+    so that in case of premature termination the process can resume.
     """
-    # Full paths for checkpoint and tensor files
     checkpoint_path = os.path.join(folder_path, checkpoint_filename)
-    crops_file_path = os.path.join(folder_path, crops_filename)
-    patches_file_path = os.path.join(folder_path, patches_filename)
     
-    # Read checkpoint file if it exists
+    # Read list of already processed files from checkpoint (if it exists)
     processed_files = set()
     if os.path.exists(checkpoint_path):
         with open(checkpoint_path, 'r') as f:
-            processed_files = set(line.strip() for line in f if line.strip())
-        print(f"Found checkpoint: {len(processed_files)} files already processed.")
+            processed_files = {line.strip() for line in f if line.strip()}
+        print(f"Resuming: {len(processed_files)} files already processed.")
     
-    # Initialize lists for accumulating crops and patches.
-    # If the tensor files already exist, load them to resume accumulation.
-    crops_list = []
-    patches_list = []
-    if os.path.exists(crops_file_path) and os.path.exists(patches_file_path):
-        try:
-            existing_crops = torch.load(crops_file_path).numpy()
-            existing_patches = torch.load(patches_file_path).numpy()
-            crops_list.append(existing_crops)
-            patches_list.append(existing_patches)
-            print(f"Loaded existing tensors: crops {existing_crops.shape}, patches {existing_patches.shape}")
-        except Exception as e:
-            print(f"Could not load existing tensors due to: {e}. Starting fresh.")
-    
-    # Get list of all .npz files in the folder and filter out the ones already processed.
-    all_npz_files = sorted([os.path.join(folder_path, f) 
+    # List all npz files and filter out already processed ones
+    all_npz_files = sorted([os.path.join(folder_path, f)
                             for f in os.listdir(folder_path) if f.endswith('.npz')])
     remaining_files = [f for f in all_npz_files if f not in processed_files]
-    print(f"Total npz files: {len(all_npz_files)}; {len(remaining_files)} remaining to process.")
+    print(f"Total files: {len(all_npz_files)}. Remaining: {len(remaining_files)}.")
     
-    # Process files in parallel using all available CPUs
+    # Set up names for partial (incomplete chunk) files
+    crops_partial_path = os.path.join(folder_path, crops_partial_name)
+    patches_partial_path = os.path.join(folder_path, patches_partial_name)
+    
+    # Initialize accumulators for the current chunk.
+    # These will hold the numpy arrays from each file.
+    partial_crops_list = []
+    partial_patches_list = []
+    partial_file_count = 0  # number of files incorporated in the current chunk
+    
+    # If a partial chunk was saved in a previous run, load it to resume.
+    if os.path.exists(crops_partial_path) and os.path.exists(patches_partial_path):
+        try:
+            existing_crops = torch.load(crops_partial_path).numpy()
+            existing_patches = torch.load(patches_partial_path).numpy()
+            partial_crops_list.append(existing_crops)
+            partial_patches_list.append(existing_patches)
+            # Note: It may be hard to tell exactly how many files contributed,
+            # so here we simply resume and wait until new files have been added.
+            print(f"Loaded partial chunk: crops {existing_crops.shape}, patches {existing_patches.shape}")
+        except Exception as e:
+            print(f"Error loading partial chunk: {e}. Starting fresh for partial chunk.")
+    
+    # Process remaining files in parallel.
     with ProcessPoolExecutor() as executor:
-        future_to_file = {executor.submit(process_file, file_path): file_path for file_path in remaining_files}
+        future_to_file = {executor.submit(process_file, file_path): file_path 
+                          for file_path in remaining_files}
         for future in as_completed(future_to_file):
             file_path = future_to_file[future]
             try:
-                file_processed, crops, patches = future.result()
+                fname, crops, patches = future.result()
             except Exception as exc:
-                print(f"File {file_path} generated an exception: {exc}")
+                print(f"Error processing {file_path}: {exc}")
                 continue
             
-            # Append the new results
-            crops_list.append(crops)
-            patches_list.append(patches)
+            # Append the results to the current partial chunk
+            partial_crops_list.append(crops)
+            partial_patches_list.append(patches)
+            partial_file_count += 1
             
-            # Update checkpoint: record this file as processed
+            # Update the checkpoint file (append the file that was just processed)
             with open(checkpoint_path, 'a') as cp_file:
-                cp_file.write(file_processed + "\n")
+                cp_file.write(fname + "\n")
             
-            # Concatenate all results along the first axis
-            all_crops = np.concatenate(crops_list, axis=0)
-            all_patches = np.concatenate(patches_list, axis=0)
+            print(f"Processed {fname} (added to current chunk; count = {partial_file_count}).")
             
-            # Convert to torch tensors and save to disk
-            crop_tensor = torch.from_numpy(all_crops)
-            patch_tensor = torch.from_numpy(all_patches)
-            torch.save(crop_tensor, crops_file_path)
-            torch.save(patch_tensor, patches_file_path)
+            # Save the partial chunk to disk (to allow resuming if interrupted)
+            try:
+                combined_crops = np.concatenate(partial_crops_list, axis=0)
+                combined_patches = np.concatenate(partial_patches_list, axis=0)
+                torch.save(torch.from_numpy(combined_crops), crops_partial_path)
+                torch.save(torch.from_numpy(combined_patches), patches_partial_path)
+                print(f"Updated partial chunk on disk: crops {combined_crops.shape}, patches {combined_patches.shape}")
+            except Exception as e:
+                print(f"Error saving partial chunk: {e}")
             
-            print(f"Processed {file_processed}: crops shape {crop_tensor.shape}, patches shape {patch_tensor.shape}")
+            # If we have accumulated enough files in the current chunk, flush to a new chunk file.
+            if partial_file_count >= files_per_chunk:
+                # Concatenate arrays from the partial list
+                combined_crops = np.concatenate(partial_crops_list, axis=0)
+                combined_patches = np.concatenate(partial_patches_list, axis=0)
+                
+                # Determine next chunk index (e.g. crops_1.pt, crops_2.pt, …)
+                chunk_index = get_next_chunk_index(folder_path)
+                crops_chunk_name = f"crops_{chunk_index}.pt"
+                patches_chunk_name = f"patches_{chunk_index}.pt"
+                crops_chunk_path = os.path.join(folder_path, crops_chunk_name)
+                patches_chunk_path = os.path.join(folder_path, patches_chunk_name)
+                
+                # Save the chunk files
+                torch.save(torch.from_numpy(combined_crops), crops_chunk_path)
+                torch.save(torch.from_numpy(combined_patches), patches_chunk_path)
+                print(f"Saved chunk {chunk_index}: crops {combined_crops.shape}, patches {combined_patches.shape}")
+                
+                # Clear the accumulators and reset the counter for the next chunk.
+                partial_crops_list = []
+                partial_patches_list = []
+                partial_file_count = 0
+                
+                # Remove the partial chunk files from the previous run.
+                if os.path.exists(crops_partial_path):
+                    os.remove(crops_partial_path)
+                if os.path.exists(patches_partial_path):
+                    os.remove(patches_partial_path)
+    
+    # After all files have been processed, if any partial data remains, flush it as a final chunk.
+    if partial_file_count > 0:
+        combined_crops = np.concatenate(partial_crops_list, axis=0)
+        combined_patches = np.concatenate(partial_patches_list, axis=0)
+        chunk_index = get_next_chunk_index(folder_path)
+        crops_chunk_name = f"crops_{chunk_index}.pt"
+        patches_chunk_name = f"patches_{chunk_index}.pt"
+        crops_chunk_path = os.path.join(folder_path, crops_chunk_name)
+        patches_chunk_path = os.path.join(folder_path, patches_chunk_name)
+        torch.save(torch.from_numpy(combined_crops), crops_chunk_path)
+        torch.save(torch.from_numpy(combined_patches), patches_chunk_path)
+        print(f"Final chunk {chunk_index} saved: crops {combined_crops.shape}, patches {combined_patches.shape}")
+        # Remove partial files if they exist.
+        if os.path.exists(crops_partial_path):
+            os.remove(crops_partial_path)
+        if os.path.exists(patches_partial_path):
+            os.remove(patches_partial_path)
+    else:
+        print("No remaining partial data to flush.")
