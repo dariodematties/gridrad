@@ -193,6 +193,25 @@ output_dir = '/data/Output/'
 process_directory_tree(input_dir=input_dir, output_dir=output_dir, checkpoint_file='checkpoint_file', n_workers=10)
 ```
 
+Now you have already abunch of `.npz` files in the `/data/Output/` directory.
+In order to conduct the preprocessing, you need to have such data in the `/data/Ouput/` directory.
+
+The preprocessing script is simply taking the `.npz` files and converting them into `.pt` files, ready to be used in the training process.
+For instance, in each `.npz` file, you have the following
+a crop of shape `(C, 2048, 2048)` and patches of shape `(8, 8, C, 256, 256)`, where `C` is the number of channels (e.g. 1 or 2).
+
+The following script will read the `.npz` files one by one, and then compose two tensors, one for the crop and one for the patches.
+The crops tensor will have a shape of `(M, 2048, 2048)`, where `M` is the total number of channels collected though the iteration.
+The patches tensor will have a shape of `(N, 256, 256)`, where `N` is the total number of patches collected through the iteration (somehting about `8 x 8 x C x` the number of `.npz` files.
+
+
+```python
+from utils import process_npz_files_parallel
+directory_path = '/data/Output/'
+process_npz_files_parallel(directory_path)
+```
+
+This script will run in parallel and will save the `.pt` files in the same directory as the `.npz` files.
 
 ## APPTAINER
 
