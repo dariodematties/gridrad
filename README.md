@@ -206,9 +206,9 @@ The patches tensor will have a shape of `(N, 256, 256)`, where `N` is the total 
 
 
 ```python
-from utils import process_npz_files_parallel
+from utils import process_npz_files_progressive
 directory_path = '/data/Output/'
-process_npz_files_parallel(directory_path)
+process_npz_files_progressive(directory_path)
 ```
 
 This script will run in parallel and will save the `.pt` files in the same directory as the `.npz` files.
@@ -272,7 +272,7 @@ apptainer shell -B /path/to/your/data:/data satellite.sif
 Once inside Apptainer, go to the directory `dataset` inside the repo:
 
 ```bash
-Apptainer> cd ~/SATELLITE/dataset/
+Apptainer> cd ~/gridrad/dataset/
 ```
 
 Then run the preprocessing script:
@@ -296,3 +296,15 @@ In the following figures we can see the results of the preprocessing step.
 <img src="figures/Preprocessing1.png" alt="Pre-processing result" width="800"/>
 
 <img src="figures/Preprocessing2.png" alt="Pre-processing result" width="800"/>
+
+
+Then, as we previously explained you can run the following script to convert the `.npz` files into `.pt` files:
+
+```python
+from utils import process_npz_files_progressive
+directory_path = '/data/Output/'
+process_npz_files_progressive(directory_path)
+```
+
+
+
