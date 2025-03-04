@@ -588,3 +588,111 @@ def process_npz_files_progressive(folder_path,
     else:
         print("No remaining partial data to flush.")
 
+def process_chunk_file(chunk_file_path, file_type):
+    """
+    Worker function to process one chunk file.
+    
+    Parameters:
+      chunk_file_path: Full path of the chunk file (e.g., 'crops_1.pt' or 'patches_2.pt').
+      file_type: A string either 'crop' or 'patch' indicating the type.
+    
+    This function:
+      1. Loads the tensor saved in chunk_file_path.
+      2. Iterates over the first dimension and for each slice:
+         - Checks for NaN values. If any are found, the slice is discarded.
+         - Otherwise, saves it as an individual file using the naming convention:
+           <file_type>_<chunkIndex>_<localIndex>.pt
+      3. Removes the original chunk file.
+      4. Frees memory and forces garbage collection.
+    """
+    try:
+        tensor = torch.load(chunk_file_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load {chunk_file_path}: {e}")
+    
+    # Extract the chunk index from the filename.
+    base_name = os.path.basename(chunk_file_path)
+    try:
+        # Assuming the pattern is: <prefix>_<index>.pt
+        chunk_index = base_name.split('_')[1].split('.')[0]
+    except Exception as e:
+        raise ValueError(f"Unexpected filename format for {base_name}: {e}")
+    
+    num_items = tensor.shape[0]
+    valid_count = 0  # Counter for valid items saved
+    for i in range(num_items):
+        item = tensor[i]
+        # Check if the current slice contains any NaN values.
+        if torch.isnan(item).any():
+            print(f"Skipping {file_type} from chunk {chunk_index} at index {i} due to NaN values.")
+            continue
+        
+        out_file = os.path.join(
+            os.path.dirname(chunk_file_path),
+            f"{file_type}_{chunk_index}_{valid_count}.pt"
+        )
+        try:
+            torch.save(item, out_file)
+        except Exception as e:
+            raise RuntimeError(f"Error saving {out_file}: {e}")
+        valid_count += 1
+    
+    # Remove the original chunk file after processing.
+    try:
+        os.remove(chunk_file_path)
+    except Exception as e:
+        raise RuntimeError(f"Error removing {chunk_file_path}: {e}")
+    
+    # Free memory.
+    del tensor
+    gc.collect()
+    return chunk_file_path
+
+def process_chunk_files_parallel(folder_path, type_prefix, file_type, checkpoint_filename):
+    """
+    Processes all chunk files of a given type (crops or patches) in parallel.
+    
+    Parameters:
+      folder_path: Folder where the chunk files are stored.
+      type_prefix: The prefix of the chunk files ("crops" or "patches").
+      file_type: The singular form for naming individual files ("crop" or "patch").
+      checkpoint_filename: Name of the checkpoint file for this type.
+    
+    This function:
+      - Reads the checkpoint file to determine which chunk files were already processed.
+      - Lists all chunk files matching type_prefix.
+      - Processes unprocessed chunk files in parallel.
+      - As each chunk file is successfully processed, appends its name to the checkpoint file.
+    """
+    checkpoint_path = os.path.join(folder_path, checkpoint_filename)
+    processed_chunks = set()
+    if os.path.exists(checkpoint_path):
+        with open(checkpoint_path, 'r') as f:
+            processed_chunks = {line.strip() for line in f if line.strip()}
+        print(f"[{file_type}] Resuming: {len(processed_chunks)} chunk files already processed.")
+    
+    # List all chunk files for this type (e.g., crops_*.pt or patches_*.pt)
+    all_chunk_files = sorted([
+        os.path.join(folder_path, f)
+        for f in os.listdir(folder_path)
+        if f.startswith(type_prefix + "_") and f.endswith(".pt")
+    ])
+    remaining_files = [f for f in all_chunk_files if f not in processed_chunks]
+    print(f"[{file_type}] Total chunk files: {len(all_chunk_files)}. Remaining to process: {len(remaining_files)}.")
+    
+    with ProcessPoolExecutor() as executor:
+        future_to_file = {
+            executor.submit(process_chunk_file, file_path, file_type): file_path 
+            for file_path in remaining_files
+        }
+        for future in as_completed(future_to_file):
+            file_path = future_to_file[future]
+            try:
+                processed_file = future.result()
+                # Update checkpoint file (append the processed chunk file name)
+                with open(checkpoint_path, 'a') as cp:
+                    cp.write(processed_file + "\n")
+                print(f"[{file_type}] Processed and removed chunk file: {processed_file}")
+            except Exception as exc:
+                print(f"[{file_type}] Chunk file {file_path} generated an exception: {exc}")
+
