@@ -588,18 +588,22 @@ def process_npz_files_progressive(folder_path,
     else:
         print("No remaining partial data to flush.")
 
-def process_chunk_file(chunk_file_path, file_type):
+def process_chunk_file(chunk_file_path, file_type, max_deviation_factor=1e300):
     """
     Worker function to process one chunk file.
     
     Parameters:
       chunk_file_path: Full path of the chunk file (e.g., 'crops_1.pt' or 'patches_2.pt').
-      file_type: A string either 'crop' or 'patch' indicating the type.
+      file_type: A string, either 'crop' or 'patch', indicating the type.
+      max_deviation_factor: A float threshold; a slice is discarded if the maximum absolute deviation
+                            from its mean exceeds this factor times its standard deviation.
     
     This function:
       1. Loads the tensor saved in chunk_file_path.
       2. Iterates over the first dimension and for each slice:
-         - Checks for NaN values. If any are found, the slice is discarded.
+         - Checks for NaN values. If any are found, the slice is skipped.
+         - Computes the mean and standard deviation. If the maximum deviation from the mean is
+           greater than max_deviation_factor times the standard deviation, the slice is skipped.
          - Otherwise, saves it as an individual file using the naming convention:
            <file_type>_<chunkIndex>_<localIndex>.pt
       3. Removes the original chunk file.
@@ -610,22 +614,31 @@ def process_chunk_file(chunk_file_path, file_type):
     except Exception as e:
         raise RuntimeError(f"Failed to load {chunk_file_path}: {e}")
     
-    # Extract the chunk index from the filename.
+    # Extract the chunk index from the filename (expects pattern like: crops_3.pt)
     base_name = os.path.basename(chunk_file_path)
     try:
-        # Assuming the pattern is: <prefix>_<index>.pt
         chunk_index = base_name.split('_')[1].split('.')[0]
     except Exception as e:
         raise ValueError(f"Unexpected filename format for {base_name}: {e}")
     
     num_items = tensor.shape[0]
-    valid_count = 0  # Counter for valid items saved
+    valid_count = 0  # Counter for valid (saved) items
     for i in range(num_items):
         item = tensor[i]
-        # Check if the current slice contains any NaN values.
+        # Discard slices containing any NaN values.
         if torch.isnan(item).any():
             print(f"Skipping {file_type} from chunk {chunk_index} at index {i} due to NaN values.")
             continue
+        
+        # Compute mean and standard deviation.
+        mean_val = torch.mean(item)
+        std_val = torch.std(item)
+        # Only check if there is variability in the data.
+        if std_val > 0:
+            deviation = torch.max(torch.abs(item - mean_val))
+            if deviation > max_deviation_factor * std_val:
+                print(f"Skipping {file_type} from chunk {chunk_index} at index {i} due to extreme deviation (deviation: {deviation:.3f}, threshold: {max_deviation_factor * std_val:.3f}).")
+                continue
         
         out_file = os.path.join(
             os.path.dirname(chunk_file_path),
@@ -648,7 +661,7 @@ def process_chunk_file(chunk_file_path, file_type):
     gc.collect()
     return chunk_file_path
 
-def process_chunk_files_parallel(folder_path, type_prefix, file_type, checkpoint_filename):
+def process_chunk_files_parallel(folder_path, type_prefix, file_type, checkpoint_filename, max_deviation_factor=3.0):
     """
     Processes all chunk files of a given type (crops or patches) in parallel.
     
@@ -657,6 +670,7 @@ def process_chunk_files_parallel(folder_path, type_prefix, file_type, checkpoint
       type_prefix: The prefix of the chunk files ("crops" or "patches").
       file_type: The singular form for naming individual files ("crop" or "patch").
       checkpoint_filename: Name of the checkpoint file for this type.
+      max_deviation_factor: Factor used to decide whether a slice deviates too much.
     
     This function:
       - Reads the checkpoint file to determine which chunk files were already processed.
@@ -682,14 +696,14 @@ def process_chunk_files_parallel(folder_path, type_prefix, file_type, checkpoint
     
     with ProcessPoolExecutor() as executor:
         future_to_file = {
-            executor.submit(process_chunk_file, file_path, file_type): file_path 
+            executor.submit(process_chunk_file, file_path, file_type, max_deviation_factor): file_path 
             for file_path in remaining_files
         }
         for future in as_completed(future_to_file):
             file_path = future_to_file[future]
             try:
                 processed_file = future.result()
-                # Update checkpoint file (append the processed chunk file name)
+                # Update the checkpoint file (append the processed chunk file name)
                 with open(checkpoint_path, 'a') as cp:
                     cp.write(processed_file + "\n")
                 print(f"[{file_type}] Processed and removed chunk file: {processed_file}")
