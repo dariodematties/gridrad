@@ -588,33 +588,43 @@ def process_npz_files_progressive(folder_path,
     else:
         print("No remaining partial data to flush.")
 
-def process_chunk_file(chunk_file_path, file_type, max_deviation_factor=1e300):
+def process_chunk_file(chunk_file_path, file_type,
+                         max_deviation_factor=3.0,
+                         global_stats=None, global_lock=None,
+                         global_mean_deviation_factor=3.0):
     """
     Worker function to process one chunk file.
-    
+
     Parameters:
       chunk_file_path: Full path of the chunk file (e.g., 'crops_1.pt' or 'patches_2.pt').
-      file_type: A string, either 'crop' or 'patch', indicating the type.
-      max_deviation_factor: A float threshold; a slice is discarded if the maximum absolute deviation
+      file_type: A string, either 'crop' or 'patch'.
+      max_deviation_factor: Local threshold; a slice is discarded if the maximum absolute deviation
                             from its mean exceeds this factor times its standard deviation.
-    
-    This function:
-      1. Loads the tensor saved in chunk_file_path.
-      2. Iterates over the first dimension and for each slice:
-         - Checks for NaN values. If any are found, the slice is skipped.
-         - Computes the mean and standard deviation. If the maximum deviation from the mean is
-           greater than max_deviation_factor times the standard deviation, the slice is skipped.
-         - Otherwise, saves it as an individual file using the naming convention:
-           <file_type>_<chunkIndex>_<localIndex>.pt
+      global_stats: A shared dictionary (via Manager) holding keys "sum", "square_sum", "count"
+                    for computing the running mean of accepted slice means.
+      global_lock:  A multiprocessing Lock to synchronize updates to global_stats.
+      global_mean_deviation_factor: Global threshold; a slice is discarded if its mean deviates
+                                    from the current global mean by more than this factor times the
+                                    global standard deviation.
+                                    
+    The function:
+      1. Loads the tensor from chunk_file_path.
+      2. For each slice (i.e. along the first dimension):
+         - Discards it if it contains any NaN values.
+         - Computes its own mean and std; if the maximum absolute deviation from its mean is
+           larger than max_deviation_factor * std, it is discarded.
+         - If global_stats is provided and already contains accepted data (count > 0),
+           the slice is rejected if |slice_mean - global_mean| > global_mean_deviation_factor * global_std.
+         - If accepted, updates global_stats (under lock) and saves the slice as an individual file.
       3. Removes the original chunk file.
-      4. Frees memory and forces garbage collection.
+      4. Clears memory and returns the processed chunk_file_path.
     """
     try:
         tensor = torch.load(chunk_file_path)
     except Exception as e:
         raise RuntimeError(f"Failed to load {chunk_file_path}: {e}")
     
-    # Extract the chunk index from the filename (expects pattern like: crops_3.pt)
+    # Extract chunk index (assumes filename pattern like: crops_3.pt)
     base_name = os.path.basename(chunk_file_path)
     try:
         chunk_index = base_name.split('_')[1].split('.')[0]
@@ -622,61 +632,94 @@ def process_chunk_file(chunk_file_path, file_type, max_deviation_factor=1e300):
         raise ValueError(f"Unexpected filename format for {base_name}: {e}")
     
     num_items = tensor.shape[0]
-    valid_count = 0  # Counter for valid (saved) items
+    valid_count = 0  # Counter for accepted slices (for naming individual files)
     for i in range(num_items):
         item = tensor[i]
-        # Discard slices containing any NaN values.
+        # --- Local checks: discard if any NaN ---
         if torch.isnan(item).any():
             print(f"Skipping {file_type} from chunk {chunk_index} at index {i} due to NaN values.")
             continue
         
-        # Compute mean and standard deviation.
-        mean_val = torch.mean(item)
-        std_val = torch.std(item)
-        # Only check if there is variability in the data.
-        if std_val > 0:
-            deviation = torch.max(torch.abs(item - mean_val))
-            if deviation > max_deviation_factor * std_val:
-                print(f"Skipping {file_type} from chunk {chunk_index} at index {i} due to extreme deviation (deviation: {deviation:.3f}, threshold: {max_deviation_factor * std_val:.3f}).")
+        # --- Local statistical check based on the slice's own stats ---
+        item_mean = torch.mean(item).item()
+        item_std = torch.std(item).item()
+        if item_std > 0:
+            # Here we compute the maximum absolute deviation from the slice's mean.
+            # (Converting torch.max(item - item_mean) to a python float.)
+            max_dev = torch.max(torch.abs(item - item_mean)).item()
+            if max_dev > max_deviation_factor * item_std:
+                print(f"Skipping {file_type} from chunk {chunk_index} at index {i} due to extreme local deviation (max_dev={max_dev:.3f}, threshold={max_deviation_factor * item_std:.3f}).")
                 continue
-        
-        out_file = os.path.join(
-            os.path.dirname(chunk_file_path),
-            f"{file_type}_{chunk_index}_{valid_count}.pt"
-        )
+
+        # --- Global mean check ---
+        # If global_stats has been initialized and at least one slice has been accepted:
+        if global_stats is not None and global_lock is not None:
+            with global_lock:
+                count = global_stats["count"]
+                if count > 0:
+                    g_mean = global_stats["sum"] / count
+                    g_var = (global_stats["square_sum"] / count) - (g_mean ** 2)
+                    if g_var < 0:
+                        g_var = 0.0
+                    g_std = g_var ** 0.5
+                else:
+                    g_mean = item_mean
+                    g_std = 0.0
+            if count > 0 and g_std > 0:
+                if abs(item_mean - g_mean) > global_mean_deviation_factor * g_std:
+                    print(f"Skipping {file_type} from chunk {chunk_index} at index {i} due to global mean deviation (slice mean={item_mean:.3f}, global mean={g_mean:.3f}, threshold={global_mean_deviation_factor * g_std:.3f}).")
+                    continue
+
+        # --- If passed all checks, update global_stats ---
+        if global_stats is not None and global_lock is not None:
+            with global_lock:
+                global_stats["sum"] += item_mean
+                global_stats["square_sum"] += item_mean ** 2
+                global_stats["count"] += 1
+
+        # --- Save the accepted slice as an individual file ---
+        out_file = os.path.join(os.path.dirname(chunk_file_path),
+                                f"{file_type}_{chunk_index}_{valid_count}.pt")
         try:
             torch.save(item, out_file)
         except Exception as e:
             raise RuntimeError(f"Error saving {out_file}: {e}")
         valid_count += 1
-    
+
     # Remove the original chunk file after processing.
     try:
         os.remove(chunk_file_path)
     except Exception as e:
         raise RuntimeError(f"Error removing {chunk_file_path}: {e}")
     
-    # Free memory.
+    # Free memory and force garbage collection.
     del tensor
     gc.collect()
     return chunk_file_path
 
-def process_chunk_files_parallel(folder_path, type_prefix, file_type, checkpoint_filename, max_deviation_factor=3.0):
+def process_chunk_files_parallel(folder_path, type_prefix, file_type,
+                                 checkpoint_filename,
+                                 max_deviation_factor=3.0,
+                                 global_stats=None, global_lock=None,
+                                 global_mean_deviation_factor=3.0):
     """
-    Processes all chunk files of a given type (crops or patches) in parallel.
+    Processes all chunk files of a given type (e.g., "crops" or "patches") in parallel.
     
     Parameters:
       folder_path: Folder where the chunk files are stored.
-      type_prefix: The prefix of the chunk files ("crops" or "patches").
-      file_type: The singular form for naming individual files ("crop" or "patch").
+      type_prefix: The prefix of the chunk files (e.g., "crops" for crops_*.pt).
+      file_type: The singular form used for individual file names (e.g., "crop").
       checkpoint_filename: Name of the checkpoint file for this type.
-      max_deviation_factor: Factor used to decide whether a slice deviates too much.
+      max_deviation_factor: Local threshold for discarding a slice (as in process_chunk_file).
+      global_stats: Shared dictionary holding global statistics (via Manager).
+      global_lock: Lock for synchronizing updates to global_stats.
+      global_mean_deviation_factor: Threshold for discarding a slice whose mean deviates too much from the global mean.
     
     This function:
-      - Reads the checkpoint file to determine which chunk files were already processed.
+      - Reads the checkpoint file to skip already processed chunk files.
       - Lists all chunk files matching type_prefix.
-      - Processes unprocessed chunk files in parallel.
-      - As each chunk file is successfully processed, appends its name to the checkpoint file.
+      - Processes the unprocessed chunk files in parallel (each using process_chunk_file).
+      - Updates the checkpoint file as each chunk file is processed.
     """
     checkpoint_path = os.path.join(folder_path, checkpoint_filename)
     processed_chunks = set()
@@ -684,8 +727,8 @@ def process_chunk_files_parallel(folder_path, type_prefix, file_type, checkpoint
         with open(checkpoint_path, 'r') as f:
             processed_chunks = {line.strip() for line in f if line.strip()}
         print(f"[{file_type}] Resuming: {len(processed_chunks)} chunk files already processed.")
-    
-    # List all chunk files for this type (e.g., crops_*.pt or patches_*.pt)
+
+    # List all chunk files for the given type.
     all_chunk_files = sorted([
         os.path.join(folder_path, f)
         for f in os.listdir(folder_path)
@@ -693,20 +736,71 @@ def process_chunk_files_parallel(folder_path, type_prefix, file_type, checkpoint
     ])
     remaining_files = [f for f in all_chunk_files if f not in processed_chunks]
     print(f"[{file_type}] Total chunk files: {len(all_chunk_files)}. Remaining to process: {len(remaining_files)}.")
-    
+
     with ProcessPoolExecutor() as executor:
         future_to_file = {
-            executor.submit(process_chunk_file, file_path, file_type, max_deviation_factor): file_path 
+            executor.submit(process_chunk_file, file_path, file_type,
+                            max_deviation_factor, global_stats, global_lock,
+                            global_mean_deviation_factor): file_path
             for file_path in remaining_files
         }
         for future in as_completed(future_to_file):
             file_path = future_to_file[future]
             try:
                 processed_file = future.result()
-                # Update the checkpoint file (append the processed chunk file name)
+                # Update the checkpoint file.
                 with open(checkpoint_path, 'a') as cp:
                     cp.write(processed_file + "\n")
                 print(f"[{file_type}] Processed and removed chunk file: {processed_file}")
             except Exception as exc:
                 print(f"[{file_type}] Chunk file {file_path} generated an exception: {exc}")
 
+def process_all_chunks_to_individual_files(folder_path,
+                                           crops = False,
+                                           patches = False,
+                                           max_deviation_factor=3.0,
+                                           global_mean_deviation_factor=3.0):
+    """
+    Main function to process both crops and patches chunk files.
+
+    For each type, it calls process_chunk_files_parallel with all thresholds and
+    with shared global statistics for filtering based on the global mean of accepted slices.
+    After processing, each original chunk file is removed and individual files (without NaNs,
+    without extreme local deviations, and whose means are close to the global mean) are saved.
+
+    Parameters:
+      folder_path: The folder containing the chunk files.
+      max_deviation_factor: Local threshold for a slice’s maximum deviation.
+      global_mean_deviation_factor: Global threshold for discarding a slice whose mean deviates too much.
+    """
+    # Create a Manager for shared global statistics.
+    manager = multiprocessing.Manager()
+    # Initialize the global statistics: we'll track the sum of slice means, sum of squares, and count.
+    global_stats = manager.dict({"sum": 0.0, "square_sum": 0.0, "count": 0})
+    global_lock = manager.Lock()
+
+    # Process crops if crops=True
+    if crops:
+        process_chunk_files_parallel(
+            folder_path=os.path.join(folder_path, "Crops"),
+            type_prefix="crops",          # e.g., crops_1.pt, crops_2.pt, ...
+            file_type="crop",             # individual files will be named like crop_1_0.pt, etc.
+            checkpoint_filename="processed_crop_chunks.txt",
+            max_deviation_factor=max_deviation_factor,
+            global_stats=global_stats,
+            global_lock=global_lock,
+            global_mean_deviation_factor=global_mean_deviation_factor
+        )
+
+    # Process patches if patches=True
+    if patches:
+        process_chunk_files_parallel(
+            folder_path=os.path.join(folder_path, "Patches"),
+            type_prefix="patches",        # e.g., patches_1.pt, patches_2.pt, ...
+            file_type="patch",            # individual files will be named like patch_1_0.pt, etc.
+            checkpoint_filename="processed_patch_chunks.txt",
+            max_deviation_factor=max_deviation_factor,
+            global_stats=global_stats,
+            global_lock=global_lock,
+            global_mean_deviation_factor=global_mean_deviation_factor
+        )
