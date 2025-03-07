@@ -8,6 +8,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import concurrent
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 def print_netcdf_info(file_path):
@@ -804,3 +805,64 @@ def process_all_chunks_to_individual_files(folder_path,
             global_lock=global_lock,
             global_mean_deviation_factor=global_mean_deviation_factor
         )
+
+def check_and_remove_file(file_path):
+    """
+    Attempts to load the tensor file. If loading fails, attempts to remove the file.
+    
+    Args:
+        file_path (str): Full path to the tensor file.
+    
+    Returns:
+        str or None: Returns file_path if the file failed to load (and was removed), or
+                     None if the file loaded successfully.
+    """
+    try:
+        # Try loading the tensor file.
+        _ = torch.load(file_path)
+        return None
+    except Exception as e:
+        # If loading fails, try to remove the file.
+        try:
+            os.remove(file_path)
+            print(f"Removed file: {file_path}")
+        except Exception as remove_e:
+            print(f"Failed to remove file {file_path}: {remove_e}")
+        # Return the file path as a record of the failure.
+        return file_path
+
+def check_and_remove_tensor_files_parallel(root_dir, output_file, ext='.pt'):
+    """
+    Iterates over files in root_dir with the given extension, attempts to load them using torch.load
+    in parallel using available CPUs. Files that fail to load are removed from disk and their names 
+    are logged into a text file.
+    
+    Args:
+        root_dir (str): Directory where the tensor files are stored.
+        output_file (str): Path to the text file to save the list of files that failed to load.
+        ext (str): File extension to check (default is '.pt').
+    """
+    # List all files with the specified extension.
+    file_list = [os.path.join(root_dir, f) for f in os.listdir(root_dir) if f.endswith(ext)]
+    print(f"Found {len(file_list)} files with extension '{ext}' in {root_dir}.")
+    
+    failed_files = []
+    
+    # Use as many processes as available.
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        # Submit all file checks concurrently.
+        futures = {executor.submit(check_and_remove_file, file_path): file_path for file_path in file_list}
+        
+        # Collect results as they complete.
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result is not None:
+                failed_files.append(result)
+    
+    # Write the names of failed files to the output text file.
+    with open(output_file, 'w') as f:
+        for file_name in failed_files:
+            f.write(file_name + "\n")
+    
+    print(f"Finished processing files. {len(failed_files)} file(s) failed to load and were removed. See '{output_file}' for details.")
+
