@@ -155,8 +155,9 @@ def train_dino(args):
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True,
+        prefetch_factor=2,  # Prefetch batches
+        persistent_workers=True,  # Keep workers alive for faster batch loading
     )
-
     print(f"Data loaded: there are {len(dataset)} images.")
 
     # ============ building student and teacher networks ... ============

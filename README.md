@@ -1,6 +1,8 @@
 # GRIDRAD
 
-## VENV
+## Data Preprocessing
+
+### VENV
 
 ```bash
 python3 -m venv venv
@@ -159,9 +161,9 @@ websocket-client==1.8.0
 widgetsnbextension==4.0.13
 ```
 
-## DOCKER
+### DOCKER
 
-### Build
+#### Build
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 -t yourusername/pytorch-env:latest --push .
@@ -172,7 +174,7 @@ docker pull yourusername/pytorch-env:latest
 ```
 
 
-### Run
+#### Run
 
 ```bash
 docker run -it --gpus all -v /path/to/local/repo:/workspace/repo -v /path/to/local/data:/data yourusername/pytorch-env:latest
@@ -247,11 +249,11 @@ Some of those tensors break the training process, so it is important to filter t
 They basically have a very high or very low value, which produces a NaN in the loss function.
 
 
-## APPTAINER
+### APPTAINER
 
-### Build
+#### Build
 
-To run the code on ALCF Polaris supercomputer, we will use the Apptainer containerization tool.
+To run the code on [ALCF Polaris](https://www.alcf.anl.gov/polaris) supercomputer, we will use the Apptainer containerization tool.
 
 For more information on how to run jobs on Polaris, please refer to the following link:
 [Polaris](https://docs.alcf.anl.gov/polaris/running-jobs/)
@@ -363,6 +365,93 @@ process_all_chunks_to_individual_files(folder_path,
 ```
 
 These scripts run in parallel and have a checkpoint mechanism to avoid reprocessing the same files in case the process is interrupted prematurely.
+
+
+
+## Hierarchical Pre-training
+
+### VENV
+
+First create a virtual environment and install the required packages:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+Then go to the `Hierarchical_Pretraining` directory in the repo:
+
+```bash
+cd gridrad/Hierarchical_Pretraining/
+```
+
+Then run the code with the following command:
+
+```bash
+python -m torch.distributed.launch --nproc_per_node=1 main_dino.py --arch vit_small --data_path /path/to/SATELLITE/Patches/ --output_dir /path/to/Checkpoints/ --epochs 20 --batch_size_per_gpu 16 --use_fp16 False --norm_last_layer False --teacher_temp 0.00008 --warmup_teacher_temp 0.00004 --lr 0.0002 --warmup_epochs 0 --warmup_teacher_temp_epochs 19
+```
+
+### DOCKER
+
+#### Run
+
+```bash
+sudo docker run -it --gpus all -v /path/to/gridrad:/workspace/repo -v /path/to/SATELLITE/data:/data yourusername/satellite:latest
+```
+
+Then from the container go to the `/workspace/repo/Hierarchical_Pretraining` directory, in which you will find the script for the hierarchical pre-training.
+
+```bash
+python -m torch.distributed.launch --nproc_per_node=1 main_dino.py --arch vit_tiny --data_path /data/Patches/PP/ --output_dir /data/Checkpoints/ --epochs 20 --batch_size_per_gpu 8 --use_fp16 False --norm_last_layer False --teacher_temp 0.00008 --warmup_teacher_temp 0.00004 --lr 0.0002 --warmup_epochs 0 --warmup_teacher_temp_epochs 19
+```
+
+### APPTAINER
+
+We are running on [ALCF Polaris](https://www.alcf.anl.gov/polaris) at [ALCF](https://www.alcf.anl.gov/), so we need to use `APPTAINER`.
+
+This is the script that we are using to launch the training process:
+
+```bash
+#!/bin/sh
+#PBS -l select=1:system=polaris
+#PBS -q preemptable
+#PBS -l place=scatter
+#PBS -l walltime=15:00:00
+#PBS -l filesystems=home:grand
+#PBS -A MultiActiveAI
+
+export HTTP_PROXY=http://proxy.alcf.anl.gov:3128
+export HTTPS_PROXY=http://proxy.alcf.anl.gov:3128
+export http_proxy=http://proxy.alcf.anl.gov:3128
+export https_proxy=http://proxy.alcf.anl.gov:3128
+ml use /soft/modulefiles
+ml load spack-pe-base/0.8.1
+ml load apptainer
+ml load e2fsprogs
+
+export CONTAINER=/path/to/the/container/satellite.sif
+export DATA=/path/to/the/data/
+export WORKDIR=/path/to/gridrad/Hierarchical_Pretraining
+
+cd $WORKDIR
+apptainer exec --nv -B $DATA:/data $CONTAINER python -m torch.distributed.launch --nproc_per_node=4 main_dino.py --arch vit_small --data_path /data/SATELLITE/Patches/ --output_dir /data/SATELLITE/Checkpoints/ --epochs 200 --batch_size_per_gpu 16 --use_fp16 False --norm_last_layer False --teacher_temp 0.00008 --warmup_teacher_temp 0.00004 --lr 0.0002 --warmup_epochs 0 --warmup_teacher_temp_epochs 199
+```
+
+These are the hypermaters that we are using for the training process:
+
+- `--arch vit_small`: The architecture of the model.
+- `--data_path /path/to/SATELLITE/Patches/`: The path to the data.
+- `--output_dir /path/to/Checkpoints/`: The path to the output directory where the checkpoints will be saved.
+- `--epochs 20`: The number of epochs.
+- `--batch_size_per_gpu 16`: The batch size per GPU.
+- `--use_fp16 False`: Whether to use half precision or not.
+- `--norm_last_layer False`: Whether to normalize the last layer or not.
+- `--teacher_temp 0.00008`: The temperature of the teacher.
+- `--warmup_teacher_temp 0.00004`: The warmup temperature of the teacher.
+- `--lr 0.0002`: The learning rate.
+- `--warmup_epochs 0`: The number of warmup epochs.
+- `--warmup_teacher_temp_epochs 19`: The number of warmup teacher temperature epochs.
 
 
 

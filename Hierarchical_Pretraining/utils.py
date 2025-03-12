@@ -898,28 +898,50 @@ def multi_scale(samples, model):
 #         return sample
 #
 # Custom Dataset for tensor files
+# class TensorDataset(torch.utils.data.Dataset):
+#     def __init__(self, root, transform=None, ext='.pt'):
+#         """
+#         Args:
+#         - root (str): root directory of the dataset
+#         - transform (callable, optional): Optional transform to be applied on a sample.
+#         - ext (str): extension of the files to be loaded
+#         """
+#         self.root = root
+#         self.transform = transform
+#         # List only files with the desired extension (e.g. '.pt')
+#         self.files = [os.path.join(root, f) for f in os.listdir(root) if f.endswith(ext)]
+#
+#     def __len__(self):
+#         return len(self.files)
+#
+#     def __getitem__(self, idx):
+#         # Load the tensor (assumed to be saved with torch.save)
+#         tensor = torch.load(self.files[idx])
+#         # If the tensor is 2D, add a channel dimension (resulting in shape (1,256,256))
+#         if tensor.ndim == 2:
+#             tensor = tensor.unsqueeze(0)
+#         if self.transform:
+#             tensor = self.transform(tensor)
+#         return tensor
+#
 class TensorDataset(torch.utils.data.Dataset):
     def __init__(self, root, transform=None, ext='.pt'):
-        """
-        Args:
-        - root (str): root directory of the dataset
-        - transform (callable, optional): Optional transform to be applied on a sample.
-        - ext (str): extension of the files to be loaded
-        """
-        self.root = root
         self.transform = transform
-        # List only files with the desired extension (e.g. '.pt')
         self.files = [os.path.join(root, f) for f in os.listdir(root) if f.endswith(ext)]
-    
+        
+        # Preload tensors into RAM
+        self.tensors = [torch.load(f) for f in self.files]
+
     def __len__(self):
-        return len(self.files)
-    
+        return len(self.tensors)
+
     def __getitem__(self, idx):
-        # Load the tensor (assumed to be saved with torch.save)
-        tensor = torch.load(self.files[idx])
-        # If the tensor is 2D, add a channel dimension (resulting in shape (1,256,256))
+        tensor = self.tensors[idx]
+
         if tensor.ndim == 2:
             tensor = tensor.unsqueeze(0)
+        
         if self.transform:
             tensor = self.transform(tensor)
+        
         return tensor
