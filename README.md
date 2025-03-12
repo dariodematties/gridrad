@@ -213,6 +213,40 @@ process_npz_files_progressive(directory_path)
 
 This script will run in parallel and will save the `.pt` files in the same directory as the `.npz` files.
 
+If you want to form a proper dataset you have to locate each pytorch tensor in a file.
+You can do it with the following script:
+
+This is for locating mono-channel crops tensors in individual files.
+
+```python
+from utils import process_all_chunks_to_individual_files
+folder_path = '/path/to/data/' # inside data there should be a folder called Crops
+# You can adjust the thresholds as needed.
+process_all_chunks_to_individual_files(folder_path,
+                                       crops=True,
+                                       max_deviation_factor=10,
+                                       global_mean_deviation_factor=10)
+```
+
+This is for locating mono-channel patches tensors in individual files.
+
+```python
+from utils import process_all_chunks_to_individual_files
+folder_path = '/path/to/data/' # inside data there should be a folder called Patches
+# You can adjust the thresholds as needed.
+process_all_chunks_to_individual_files(folder_path,
+                                       patches=True,
+                                       max_deviation_factor=10,
+                                       global_mean_deviation_factor=10)
+```
+
+The `max_deviation_factor` is the maximum deviation factor in the tensor values to be considered as a valid tensor.
+The `global_mean_deviation_factor` is the maximum deviation factor in the tensor values to be considered as a valid tensor, considering the global mean of several tensors.
+
+Some of those tensors break the training process, so it is important to filter them out.
+They basically have a very high or very low value, which produces a NaN in the loss function.
+
+
 ## APPTAINER
 
 ### Build
@@ -305,6 +339,30 @@ from utils import process_npz_files_progressive
 directory_path = '/data/Output/'
 process_npz_files_progressive(directory_path)
 ```
+
+And also, you can run the following script to locate the tensors in individual files:
+
+```python
+from utils import process_all_chunks_to_individual_files
+folder_path = '/path/to/data/' # inside data there should be a folder called Crops
+# You can adjust the thresholds as needed.
+process_all_chunks_to_individual_files(folder_path,
+                                       crops=True,
+                                       max_deviation_factor=10,
+                                       global_mean_deviation_factor=10)
+```
+
+```python
+from utils import process_all_chunks_to_individual_files
+folder_path = '/path/to/data/' # inside data there should be a folder called Patches
+# You can adjust the thresholds as needed.
+process_all_chunks_to_individual_files(folder_path,
+                                       patches=True,
+                                       max_deviation_factor=10,
+                                       global_mean_deviation_factor=10)
+```
+
+These scripts run in parallel and have a checkpoint mechanism to avoid reprocessing the same files in case the process is interrupted prematurely.
 
 
 
