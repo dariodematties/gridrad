@@ -443,7 +443,7 @@ These are the hypermaters that we are using for the training process:
 - `--arch vit_small`: The architecture of the model.
 - `--data_path /path/to/SATELLITE/Patches/`: The path to the data.
 - `--output_dir /path/to/Checkpoints/`: The path to the output directory where the checkpoints will be saved.
-- `--epochs 20`: The number of epochs.
+- `--epochs 200`: The number of epochs.
 - `--batch_size_per_gpu 16`: The batch size per GPU.
 - `--use_fp16 False`: Whether to use half precision or not.
 - `--norm_last_layer False`: Whether to normalize the last layer or not.
@@ -451,7 +451,54 @@ These are the hypermaters that we are using for the training process:
 - `--warmup_teacher_temp 0.00004`: The warmup temperature of the teacher.
 - `--lr 0.0002`: The learning rate.
 - `--warmup_epochs 0`: The number of warmup epochs.
-- `--warmup_teacher_temp_epochs 19`: The number of warmup teacher temperature epochs.
+- `--warmup_teacher_temp_epochs 199`: The number of warmup teacher temperature epochs.
 
 
+In order to launch the training process, you need to submit the script to the queue:
 
+```bash
+qsub train_HIPT.sh
+```
+
+
+## Hierarchical Inference
+
+### VENV
+
+First create a virtual environment and install the required packages:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+Then go to the `Hierarchical_Pretraining` directory in the repo:
+
+```bash
+cd gridrad/Hierarchical_Inference/
+```
+
+Then run the code with the following command:
+
+```bash
+python -m torch.distributed.launch --nproc_per_node=1 From_ViT16_to_ViT256.py --data_path /path/to/data/SATELLITE/Crops/ --pretrained_weights /path/to/data/SATELLITE/Checkpoints/checkpointXXXX.pth --batch_size_per_gpu 4 --output_dir /path/to/data/SATELLITE/output_inference/
+```
+
+### DOCKER
+
+#### Run
+
+```bash
+sudo docker run --shm-size=2g -it --gpus all -v /path/to/gridrad:/workspace/repo -v /path/to/data/SATELLITE:/data dariodematties/satellite:latest
+```
+
+where --shm-size=2g is the shared memory size.
+
+Then from the container go to the `/workspace/repo/Hierarchical_Pretraining/` directory, in which you will find the script for the hierarchical inference.
+
+```bash
+python -m torch.distributed.launch --nproc_per_node=1 From_ViT16_to_ViT256.py --data_path /data/Crops/ --pretrained_weights /data/Checkpoints/checkpointxxxx.pth --batch_size_per_gpu 4 --output_dir /data/output_inference/
+```
+
+### APPTAINER

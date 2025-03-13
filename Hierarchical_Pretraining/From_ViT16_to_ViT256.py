@@ -11,6 +11,7 @@ from utils import TensorDataset
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
+import torch.distributed as dist
 import torchvision.models as torchvision_models
 from torchvision import transforms
 
@@ -21,7 +22,6 @@ from einops import rearrange, repeat
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(torchvision_models.__dict__[name]))
-
 
 def get_args_parser():
     parser = argparse.ArgumentParser('DINO', add_help=False)
@@ -44,7 +44,6 @@ def get_args_parser():
         Not normalizing leads to better performance but can make the training unstable.
         In our experiments, we typically set this paramater to False with vit_small and True with vit_base.""")
 
-
     # Misc
     parser.add_argument('--batch_size_per_gpu', default=64, type=int,
         help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
@@ -63,8 +62,8 @@ def get_args_parser():
     parser.add_argument("--checkpoint_key", default="teacher", type=str, help='Key to use in the checkpoint (example: "teacher")')
     return parser
 
-
 def inference_on_pretrained_model(args):
+    # Set device and initialize distributed mode
     args.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     utils.init_distributed_mode(args)
     utils.fix_random_seeds(args.seed)
@@ -72,17 +71,8 @@ def inference_on_pretrained_model(args):
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
     cudnn.benchmark = True
 
-    # First, we load the data
-    tensors = torch.load(args.data_path)
-    # Since we have a tensor of shape [N, N, H, W], we need to flatten the first two dimensions
-    # because the DataLoader expects a tensor of shape [M, H, W]
-    tensors = tensors.view(tensors.size(0)*tensors.size(1), tensors.size(2), tensors.size(3))
-    # We add a channel dimension to the tensor because the DataLoader expects a tensor of shape [M, C, H, W]
-    # where C is the number of channels, since we have grayscale images, C=1
-    tensors = tensors.unsqueeze(1)
-    print(f"Data loaded: tensors shape is {tensors.shape}")
-    dataset = TensorDataset(tensors)
-    # dataset = datasets.ImageFolder(args.data_path, transform=transform)
+    # ============ loading data ============
+    dataset = TensorDataset(args.data_path)
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=False)
     data_loader = torch.utils.data.DataLoader(
         dataset,
@@ -91,21 +81,21 @@ def inference_on_pretrained_model(args):
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True,
+        prefetch_factor=2,  # Prefetch batches
+        persistent_workers=True,  # Keep workers alive for faster batch loading
     )
     print(f"Data loaded: there are {len(dataset)} images.")
 
-
-    # ============ building model network ... ============
+    # ============ building model ============
     model = load_model(args)
     print(f"Model loaded: {args.arch} model with patch size {args.patch_size} and output dimension {args.out_dim}.")
     print(f"Model loaded: {model}")
-
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Inference on 2kx2k images:'
     output_features = []
     for it, (images) in enumerate(metric_logger.log_every(data_loader, 10, header)):
-        # move images to gpu
+        # move images to device
         images = images.to(args.device, non_blocking=True)
 
         # forward pass
@@ -114,14 +104,80 @@ def inference_on_pretrained_model(args):
             print(f"Features shape: {features_cls256.shape}")
             output_features.append(features_cls256)
 
+    # Concatenate features from local batches
     output_features = concatenate_features(output_features)
-    print(f"Output features shape: {output_features.shape}")
+    print(f"Local output features shape: {output_features.shape}")
 
-    # Save the output features
-    torch.save(output_features, os.path.join(args.output_dir, "output_features.pt"))
+    # ============ Distributed Gathering ============
+    # Create a list placeholder to gather tensors from all processes.
+    world_size = dist.get_world_size()
+    gathered_features = [None for _ in range(world_size)]
+    # Use all_gather_object to gather the (possibly varying-sized) tensors
+    dist.all_gather_object(gathered_features, output_features)
+    if utils.is_main_process():
+        # On the main process, concatenate the gathered tensors along the first dimension.
+        all_features = torch.cat(gathered_features, dim=0)
+        print(f"All gathered features shape: {all_features.shape}")
 
+        # Save the output features
+        if not os.path.exists(args.output_dir):
+            os.makedirs(args.output_dir)
+        save_path = os.path.join(args.output_dir, "output_features.pt")
+        torch.save(all_features, save_path)
+        print(f"Saved gathered features to {save_path}")
 
-
+# def inference_on_pretrained_model(args):
+#     args.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+#     utils.init_distributed_mode(args)
+#     utils.fix_random_seeds(args.seed)
+#     print("git:\n  {}\n".format(utils.get_sha()))
+#     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
+#     cudnn.benchmark = True
+#
+#     # First, we load the data
+#     # dataset = TensorDataset(tensors)
+#     dataset = TensorDataset(args.data_path)
+#     # dataset = datasets.ImageFolder(args.data_path, transform=transform)
+#     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=False)
+#     data_loader = torch.utils.data.DataLoader(
+#         dataset,
+#         sampler=sampler,
+#         batch_size=args.batch_size_per_gpu,
+#         num_workers=args.num_workers,
+#         pin_memory=True,
+#         drop_last=True,
+#         prefetch_factor=2,  # Prefetch batches
+#         persistent_workers=True,  # Keep workers alive for faster batch loading
+#     )
+#     print(f"Data loaded: there are {len(dataset)} images.")
+#
+#
+#     # ============ building model network ... ============
+#     model = load_model(args)
+#     print(f"Model loaded: {args.arch} model with patch size {args.patch_size} and output dimension {args.out_dim}.")
+#     print(f"Model loaded: {model}")
+#
+#
+#     metric_logger = utils.MetricLogger(delimiter="  ")
+#     header = 'Inference on 2kx2k images:'
+#     output_features = []
+#     for it, (images) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+#         # move images to gpu
+#         images = images.to(args.device, non_blocking=True)
+#
+#         # forward pass
+#         with torch.no_grad():
+#             features_cls256 = forward(images, model, args.device)
+#             print(f"Features shape: {features_cls256.shape}")
+#             output_features.append(features_cls256)
+#
+#     output_features = concatenate_features(output_features)
+#     print(f"Output features shape: {output_features.shape}")
+#
+#     # Save the output features
+#     if not os.path.exists(args.output_dir):
+#         os.makedirs(args.output_dir)
+#     torch.save(output_features, os.path.join(args.output_dir, "output_features.pt"))
 
 def load_model(args):
     # build model
@@ -135,7 +191,7 @@ def load_model(args):
 
     try: 
         os.path.isfile(args.pretrained_weights)
-        state_dict = torch.load(args.pretrained_weights, map_location="cpu")
+        state_dict = torch.load(args.pretrained_weights, map_location="cpu", weights_only=False)
         if (
             args.checkpoint_key is not None
             and args.checkpoint_key in state_dict
@@ -157,9 +213,6 @@ def load_model(args):
         print("Pretrained model not found in `--pretrained_weights` path")
 
     return model
-
-
-
 
 def forward(x, model256, device256):
     """
@@ -227,9 +280,6 @@ def prepare_img_tensor(img: torch.Tensor, patch_size=256):
 
     return img_new, w_256, h_256, batch_size, num_channels
 
-
-
-
 def concatenate_features(feature_list):
     """
     Concatenate a list of feature tensors along the first dimension.
@@ -242,8 +292,6 @@ def concatenate_features(feature_list):
         Concatenated tensor with shape [N*64, 8, 8, 384] where N is len(feature_list)
     """
     return torch.cat(feature_list, dim=0)
-
-
 
 if __name__ == '__main__':
     parser = get_args_parser()
