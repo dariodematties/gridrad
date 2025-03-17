@@ -32,6 +32,7 @@ import torch
 from torch import nn
 import torchvision.transforms as T
 import torch.distributed as dist
+from torch.utils.data import Dataset
 from PIL import ImageFilter, ImageOps
 
 from torch.utils.data import IterableDataset, DataLoader, get_worker_info
@@ -897,34 +898,56 @@ def multi_scale(samples, model):
 #             sample = self.transform(sample)
 #         return sample
 #
+
 # Custom Dataset for tensor files
-# class TensorDataset(torch.utils.data.Dataset):
-#     def __init__(self, root, transform=None, ext='.pt'):
-#         """
-#         Args:
-#         - root (str): root directory of the dataset
-#         - transform (callable, optional): Optional transform to be applied on a sample.
-#         - ext (str): extension of the files to be loaded
-#         """
-#         self.root = root
-#         self.transform = transform
-#         # List only files with the desired extension (e.g. '.pt')
-#         self.files = [os.path.join(root, f) for f in os.listdir(root) if f.endswith(ext)]
-#
-#     def __len__(self):
-#         return len(self.files)
-#
-#     def __getitem__(self, idx):
-#         # Load the tensor (assumed to be saved with torch.save)
-#         tensor = torch.load(self.files[idx])
-#         # If the tensor is 2D, add a channel dimension (resulting in shape (1,256,256))
-#         if tensor.ndim == 2:
-#             tensor = tensor.unsqueeze(0)
-#         if self.transform:
-#             tensor = self.transform(tensor)
-#         return tensor
-#
 class TensorDataset(torch.utils.data.Dataset):
+    def __init__(self, root, transform=None, ext='.pt'):
+        """
+        Args:
+        - root (str): root directory of the dataset
+        - transform (callable, optional): Optional transform to be applied on a sample.
+        - ext (str): extension of the files to be loaded
+        """
+        self.root = root
+        self.transform = transform
+        # List only files with the desired extension (e.g. '.pt')
+        self.files = [os.path.join(root, f) for f in os.listdir(root) if f.endswith(ext)]
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        # Load the tensor (assumed to be saved with torch.save)
+        tensor = torch.load(self.files[idx])
+        # If the tensor is 2D, add a channel dimension (resulting in shape (1,256,256))
+        if tensor.ndim == 2:
+            tensor = tensor.unsqueeze(0)
+        if self.transform:
+            tensor = self.transform(tensor)
+        return tensor
+
+class TensorDataset1(Dataset):
+    def __init__(self, directory):
+        self.files = sorted([
+            os.path.join(directory, fname) for fname in os.listdir(directory)
+            if fname.endswith('.pt')
+        ])
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        tensor = torch.load(self.files[idx])
+        # If the tensor is 2D, add a channel dimension (resulting in shape (1,256,256))
+        if tensor.ndim == 2:
+            tensor = tensor.unsqueeze(0)
+        # if self.transform:
+        #     tensor = self.transform(tensor)
+
+        filename = os.path.basename(self.files[idx])
+        return tensor, filename
+
+class TensorDataset2(torch.utils.data.Dataset):
     def __init__(self, root, transform=None, ext='.pt'):
         self.transform = transform
         self.files = [os.path.join(root, f) for f in os.listdir(root) if f.endswith(ext)]

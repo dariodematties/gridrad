@@ -367,6 +367,29 @@ process_all_chunks_to_individual_files(folder_path,
 These scripts run in parallel and have a checkpoint mechanism to avoid reprocessing the same files in case the process is interrupted prematurely.
 
 
+### Check and remove corrupt tensor files 
+
+Iterates over files in `root_dir` with the given extension, attempts to load them using `torch.load`
+in parallel using available CPUs. Files that fail to load are removed from disk and their names 
+are logged into a text file in order to keep track of them.
+
+In any of the environments and following their corresponding procedures for each case, run the following code:
+
+First go to `dataset` directory:
+
+```bash
+cd gridrad/dataset/
+```
+
+Then run the following code:
+
+```python
+from utils import check_and_remove_tensor_files_parallel
+root_dir = '/path/to/data/SATELLITE/Patches/'
+output_file = '/path/to/data/SATELLITE/Patches/corrupted_files.txt'
+check_and_remove_tensor_files_parallel(root_dir, output_file)
+```
+
 
 ## Hierarchical Pre-training
 
@@ -403,7 +426,7 @@ sudo docker run -it --gpus all -v /path/to/gridrad:/workspace/repo -v /path/to/S
 Then from the container go to the `/workspace/repo/Hierarchical_Pretraining` directory, in which you will find the script for the hierarchical pre-training.
 
 ```bash
-python -m torch.distributed.launch --nproc_per_node=1 main_dino.py --arch vit_tiny --data_path /data/Patches/PP/ --output_dir /data/Checkpoints/ --epochs 20 --batch_size_per_gpu 8 --use_fp16 False --norm_last_layer False --teacher_temp 0.00008 --warmup_teacher_temp 0.00004 --lr 0.0002 --warmup_epochs 0 --warmup_teacher_temp_epochs 19
+python -m torch.distributed.launch --nproc_per_node=1 main_dino.py --arch vit_tiny --data_path /data/Patches/ --output_dir /data/Checkpoints/ --epochs 20 --batch_size_per_gpu 8 --use_fp16 False --norm_last_layer False --teacher_temp 0.00008 --warmup_teacher_temp 0.00004 --lr 0.0002 --warmup_epochs 0 --warmup_teacher_temp_epochs 19
 ```
 
 ### APPTAINER
@@ -438,7 +461,7 @@ cd $WORKDIR
 apptainer exec --nv -B $DATA:/data $CONTAINER python -m torch.distributed.launch --nproc_per_node=4 main_dino.py --arch vit_small --data_path /data/SATELLITE/Patches/ --output_dir /data/SATELLITE/Checkpoints/ --epochs 200 --batch_size_per_gpu 16 --use_fp16 False --norm_last_layer False --teacher_temp 0.00008 --warmup_teacher_temp 0.00004 --lr 0.0002 --warmup_epochs 0 --warmup_teacher_temp_epochs 199
 ```
 
-These are the hypermaters that we are using for the training process:
+These are the hyper-parameters that we are using for the training process:
 
 - `--arch vit_small`: The architecture of the model.
 - `--data_path /path/to/SATELLITE/Patches/`: The path to the data.
@@ -461,7 +484,14 @@ qsub train_HIPT.sh
 ```
 
 
+
 ## Hierarchical Inference
+
+In this case, since we are with the lowest level in the hierarchy, we feed the model with 2048 x 2048 crops.
+The script gets 256 x 256 patches from the crop and feeds them to the model.
+
+Basically each 2048 x 2048 crop is divided into 8 x 8 (64) 256 x 256 patches and each patch is fed to the model to generate an embedding.
+Therefore, we have 64 embeddings per crop i.e. the model generates 8 x 8 384 embeddings per crop.
 
 ### VENV
 

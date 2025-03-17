@@ -6,7 +6,7 @@ import os
 import argparse
 
 import utils
-from utils import TensorDataset
+from utils import TensorDataset1
 
 import torch
 import torch.nn as nn
@@ -72,8 +72,18 @@ def inference_on_pretrained_model(args):
     cudnn.benchmark = True
 
     # ============ loading data ============
-    dataset = TensorDataset(args.data_path)
+    dataset = TensorDataset1(args.data_path)
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=False)
+    # data_loader = torch.utils.data.DataLoader(
+    #     dataset,
+    #     sampler=sampler,
+    #     batch_size=args.batch_size_per_gpu,
+    #     num_workers=args.num_workers,
+    #     pin_memory=True,
+    #     drop_last=True,
+    #     prefetch_factor=2,  # Prefetch batches
+    #     persistent_workers=True,  # Keep workers alive for faster batch loading
+    # )
     data_loader = torch.utils.data.DataLoader(
         dataset,
         sampler=sampler,
@@ -83,6 +93,10 @@ def inference_on_pretrained_model(args):
         drop_last=True,
         prefetch_factor=2,  # Prefetch batches
         persistent_workers=True,  # Keep workers alive for faster batch loading
+        collate_fn=lambda batch: (
+            torch.stack([item[0] for item in batch]),
+            [item[1] for item in batch]
+        )
     )
     print(f"Data loaded: there are {len(dataset)} images.")
 
@@ -94,7 +108,8 @@ def inference_on_pretrained_model(args):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Inference on 2kx2k images:'
     output_features = []
-    for it, (images) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    output_filenames = []
+    for it, (images, filenames) in enumerate(metric_logger.log_every(data_loader, 10, header)):
         # move images to device
         images = images.to(args.device, non_blocking=True)
 
@@ -103,6 +118,7 @@ def inference_on_pretrained_model(args):
             features_cls256 = forward(images, model, args.device)
             print(f"Features shape: {features_cls256.shape}")
             output_features.append(features_cls256)
+            output_filenames.extend(filenames)
 
     # Concatenate features from local batches
     output_features = concatenate_features(output_features)
@@ -114,16 +130,29 @@ def inference_on_pretrained_model(args):
     gathered_features = [None for _ in range(world_size)]
     # Use all_gather_object to gather the (possibly varying-sized) tensors
     dist.all_gather_object(gathered_features, output_features)
+
+    # Gather filenames from all processes
+    gathered_filenames = [None for _ in range(world_size)]
+    dist.all_gather_object(gathered_filenames, output_filenames)
+
+    # Only the main process will save the output features
     if utils.is_main_process():
         # On the main process, concatenate the gathered tensors along the first dimension.
         all_features = torch.cat(gathered_features, dim=0)
+        all_filenames = sum(gathered_filenames, []) # Flatten the list of lists
         print(f"All gathered features shape: {all_features.shape}")
+        print(f"Total filenames collected: {len(all_filenames)}")
+
+        # Create a dictionary mapping filenames to features
+        feature_dict = {
+                filename: feature for filename, feature in zip(all_filenames, all_features)
+        }
 
         # Save the output features
         if not os.path.exists(args.output_dir):
             os.makedirs(args.output_dir)
         save_path = os.path.join(args.output_dir, "output_features.pt")
-        torch.save(all_features, save_path)
+        torch.save(feature_dict, save_path)
         print(f"Saved gathered features to {save_path}")
 
 # def inference_on_pretrained_model(args):
