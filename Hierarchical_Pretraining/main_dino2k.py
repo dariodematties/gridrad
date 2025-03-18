@@ -310,8 +310,9 @@ def train_dino(args):
         if args.save_best and train_stats['loss'] < best_loss:
             best_loss = train_stats['loss']
             # Remove previous best checkpoint
-            if os.path.exists(os.path.join(args.output_dir, f'checkpoint_best{best_epoch:04}.pth')):
-                os.remove(os.path.join(args.output_dir, f'checkpoint_best{best_epoch:04}.pth'))
+            if utils.is_main_process():
+                if os.path.exists(os.path.join(args.output_dir, f'checkpoint_best{best_epoch:04}.pth')):
+                    os.remove(os.path.join(args.output_dir, f'checkpoint_best{best_epoch:04}.pth'))
             best_epoch = epoch
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint_best{epoch:04}.pth'))
 
