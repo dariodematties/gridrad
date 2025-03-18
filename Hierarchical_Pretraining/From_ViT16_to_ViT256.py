@@ -117,6 +117,7 @@ def inference_on_pretrained_model(args):
         with torch.no_grad():
             features_cls256 = forward(images, model, args.device)
             print(f"Features shape: {features_cls256.shape}")
+            features_cls256 = features_cls256.reshape(features_cls256.size(0), -1, features_cls256.size(3))
             output_features.append(features_cls256)
             output_filenames.extend(filenames)
 

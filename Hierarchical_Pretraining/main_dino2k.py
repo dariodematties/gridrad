@@ -29,22 +29,24 @@ import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torchvision import models as torchvision_models
+from torch.utils.data.dataset import Dataset
 
 import utils
-from utils import TensorDataset
-import vision_transformer as vits
-from vision_transformer import DINOHead
+import vision_transformer2k as vits
+from vision_transformer2k import DINOHead
+
+from einops import rearrange, repeat, reduce
 
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(torchvision_models.__dict__[name]))
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('DINO', add_help=False)
+    parser = argparse.ArgumentParser('DINO2K', add_help=False)
 
     # Model parameters
-    parser.add_argument('--arch', default='vit_small', type=str,
-        choices=['vit_tiny', 'vit_small', 'vit_base', 'xcit', 'deit_tiny', 'deit_small'] \
+    parser.add_argument('--arch', default='vit_xs', type=str,
+        choices=['vit2k_xs', 'vit_tiny', 'vit_small', 'vit_base', 'xcit', 'deit_tiny', 'deit_small'] \
                 + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
         help="""Name of architecture to train. For quick experiments with ViTs,
         we recommend using vit_tiny or vit_small.""")
@@ -72,7 +74,7 @@ def get_args_parser():
     parser.add_argument('--teacher_temp', default=0.04, type=float, help="""Final value (after linear warmup)
         of the teacher temperature. For most experiments, anything above 0.07 is unstable. We recommend
         starting with the default value of 0.04 and increase this slightly if needed.""")
-    parser.add_argument('--warmup_teacher_temp_epochs', default=30, type=int,
+    parser.add_argument('--warmup_teacher_temp_epochs', default=0, type=int,
         help='Number of warmup epochs for the teacher temperature (Default: 30).')
 
     # Training/Optimization parameters
@@ -121,7 +123,7 @@ def get_args_parser():
     parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
         help='Please specify path to the ImageNet training data.')
     parser.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
-    parser.add_argument('--save_best', default=True, type=utils.bool_flag, help='Save only the best checkpoint.')
+    parser.add_argument('--save_best', default=True, type=utils.bool_flag, help='Save best checkpoint.')
     parser.add_argument('--saveckp_freq', default=20, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
     parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
@@ -140,14 +142,13 @@ def train_dino(args):
     cudnn.benchmark = True
 
     # ============ preparing data ... ============
-    transform = GridRadDataAugmentationDINO(
-        args.global_crops_scale,
-        args.local_crops_scale,
-        args.local_crops_number,
+    transform = DataAugmentationDINO2K(
+        args.local_crops_number
     )
-    # First, we load the data
-    dataset = TensorDataset(args.data_path, transform=transform)
-    # dataset = datasets.ImageFolder(args.data_path, transform=transform)
+    
+    # Using custom dataset for our [64 x 384] tensors
+    dataset = SeqDataset(dataroot=args.data_path, transform=transform)
+    
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
     data_loader = torch.utils.data.DataLoader(
         dataset,
@@ -156,8 +157,6 @@ def train_dino(args):
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True,
-        prefetch_factor=2,  # Prefetch batches
-        persistent_workers=True,  # Keep workers alive for faster batch loading
     )
     print(f"Data loaded: there are {len(dataset)} images.")
 
@@ -210,7 +209,7 @@ def train_dino(args):
     else:
         # teacher_without_ddp and teacher are the same thing
         teacher_without_ddp = teacher
-    student = nn.parallel.DistributedDataParallel(student, device_ids=[args.gpu])
+    student = nn.parallel.DistributedDataParallel(student, device_ids=[args.gpu], find_unused_parameters=True)
     # teacher and student start with the same weights
     teacher_without_ddp.load_state_dict(student.module.state_dict())
     # there is no backpropagation through the teacher, so no need for gradients
@@ -276,7 +275,7 @@ def train_dino(args):
     best_loss = 1e10
     best_epoch = 0
     for epoch in range(start_epoch, args.epochs):
-        # data_loader.sampler.set_epoch(epoch)
+        data_loader.sampler.set_epoch(epoch)
 
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
@@ -319,8 +318,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                     fp16_scaler, args):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
-    for it, (images) in enumerate(metric_logger.log_every(data_loader, 10, header)):
-    # for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
         # update weight decay and learning rate according to their schedule
         it = len(data_loader) * epoch + it  # global training iteration
         for i, param_group in enumerate(optimizer.param_groups):
@@ -335,6 +333,9 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             teacher_output = teacher(images[:2])  # only the 2 global views pass through the teacher
             student_output = student(images)
             loss = dino_loss(student_output, teacher_output, epoch)
+            
+            # print(f'dino_loss: {loss}')
+            loss = loss
 
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()), force=True)
@@ -432,101 +433,59 @@ class DINOLoss(nn.Module):
         # ema update
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
+### Custom Dataset Implemented to Load in [64-Length x 384-Dim] Tensors which correspond to extracted ViT-16 features for 2K x 2K patch
+class SeqDataset(Dataset):
+    def __init__(self, dataroot, transform):
+        seq_list = os.listdir(dataroot)
+        self.seq_list = [os.path.join(dataroot, fname) for fname in seq_list]
+        self.transform = transform
+        
+    def __getitem__(self, index):
+        seq = torch.load(self.seq_list[index])
+        label = torch.zeros(1,1)
+        # print(f'Loading seq with shape {seq.shape}')
+        return self.transform(seq), label
 
-class DataAugmentationDINO(object):
-    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
-        flip_and_color_jitter = transforms.Compose([
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomApply(
-                [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
-                p=0.8
-            ),
-            transforms.RandomGrayscale(p=0.2),
-        ])
-        normalize = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-        ])
+    def __len__(self):
+        return len(self.seq_list)
 
-        # first global crop
-        self.global_transfo1 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(1.0),
-            normalize,
-        ])
-        # second global crop
-        self.global_transfo2 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(0.1),
-            utils.Solarization(0.2),
-            normalize,
-        ])
-        # transformation for the local small crops
-        self.local_crops_number = local_crops_number
-        self.local_transfo = transforms.Compose([
-            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(p=0.5),
-            normalize,
-        ])
-
-    def __call__(self, image):
-        crops = []
-        crops.append(self.global_transfo1(image))
-        crops.append(self.global_transfo2(image))
-        for _ in range(self.local_crops_number):
-            crops.append(self.local_transfo(image))
-        return crops
-
-
-class GridRadDataAugmentationDINO(object):
-    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
+### Modified Data Augmentaton for DINO for 2K x 2K resolutions for performing local / global crops on features in image grid
+class DataAugmentationDINO2K(object):
+    def __init__(self, local_crops_number):
         flip = transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),
         ])
-        normalize = transforms.Compose([
-            transforms.Normalize((0.5,), (0.5,)),
-        ])
 
         # first global crop
         self.global_transfo1 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
-            flip,
-            utils.TensorGaussianBlur(1.0),
-            normalize,
+            transforms.RandomCrop(8),
+            transforms.RandomHorizontalFlip(p=0.5),
         ])
+        
         # second global crop
         self.global_transfo2 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
-            flip,
-            utils.TensorGaussianBlur(0.1),
-            utils.TensorSolarization(0.2),
-            normalize,
+            transforms.RandomCrop(8),
+            transforms.RandomHorizontalFlip(p=0.5),
         ])
+        
         # transformation for the local small crops
         self.local_crops_number = local_crops_number
         self.local_transfo = transforms.Compose([
-            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
-            flip,
-            utils.TensorGaussianBlur(p=0.5),
-            normalize,
+            transforms.RandomCrop(4),
+            transforms.RandomHorizontalFlip(p=0.5),
         ])
 
     def __call__(self, image):
         crops = []
+        image = image.unfold(0, 8, 8).transpose(0,1)
         crops.append(self.global_transfo1(image))
         crops.append(self.global_transfo2(image))
         for _ in range(self.local_crops_number):
             crops.append(self.local_transfo(image))
         return crops
 
-
-
-
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser('DINO', parents=[get_args_parser()])
+    parser = argparse.ArgumentParser('DINO2K', parents=[get_args_parser()])
     args = parser.parse_args()
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     train_dino(args)
