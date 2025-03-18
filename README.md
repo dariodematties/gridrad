@@ -539,6 +539,66 @@ python -m torch.distributed.launch --nproc_per_node=1 From_ViT16_to_ViT256.py --
 ### VENV
 
 Using the same procedure as before, create a virtual environment and install the required packages.
+
+Before running the pre-training process for the 2k higher level, you need to run the following script to convert the features from the previous step into individual `.pt` files.
+
+First, go to the `dataset` directory:
+
+```bash
+cd gridrad/dataset/
+```
+
+Then run the following code in a python shell:
+
+```python
+import os
+import torch
+from pathlib import Path
+```
+
+```python
+# Load the features generated from the first layer in the hierarchy
+output_features_paht = '/path/to/your/data/SATELLITE/output_inference/output_features.pt'
+features = torch.load(output_features_paht)
+# output_dir is the path pointing to the folder in which the files will be saved
+# These files will be used for training the next layer in the hierarchy
+output_dir = '/path/to/your/data/SATELLITE/input_2k/'
+```
+
+```python
+# Just inspect on element of features (replace 'crop_30_0.pt' with an appropriate feature name)
+features['crop_30_0.pt'].shape
+```
+
+```python
+# This is the loop that generates the individual files per each element in features
+Path(output_dir).mkdir(parents=True, exist_ok=True)
+for i, (file_name, embedding) in enumerate(features.items()):
+    print(i)
+    print(file_name)
+    print(embedding.shape)
+    torch.save(embedding, os.path.join(output_dir, file_name))
+```
+
+```python
+# Now I am inspecting the output
+input_tensor = torch.load('/path/to/your/data/SATELLITE/input_2k/crop_30_0.pt')
+input_tensor.shape
+```
+
+```python
+# And this is the number of elements inside features
+len(features)
+```
+
+The same sequence on this script is in a jupyter notebook in the `dataset` directory whose name is `Prepare_inputs_for_2k_upper_layer.ipynb`.
+
+
+Once the input for the 2k upper layer is ready, you can run the pre-training process.
+
+
+
+
 Then go to the `Hierarchical_Pretraining` directory in the repo:
 
 ```bash
