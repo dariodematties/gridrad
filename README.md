@@ -591,7 +591,7 @@ input_tensor.shape
 len(features)
 ```
 
-The same sequence on this script is in a jupyter notebook in the `dataset` directory whose name is `Prepare_inputs_for_2k_upper_layer.ipynb`.
+The same sequence on this script is in a `jupyter-notebook` in the `dataset` directory whose name is `Prepare_inputs_for_2k_upper_layer.ipynb`.
 
 
 Once the input for the 2k upper layer is ready, you can run the pre-training process.

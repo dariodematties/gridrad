@@ -273,8 +273,19 @@ def train_dino(args):
 
     start_time = time.time()
     print("Starting DINO training !")
-    best_loss = 1e10
-    best_epoch = 0
+    # First ask if best checkpoint exists
+    if os.path.exists(os.path.join(args.output_dir, f'best_loss.txt')):
+        with open(os.path.join(args.output_dir, f'best_loss.txt'), 'r') as f:
+            best_loss = float(f.read())
+        # If best_loss exists, then best_epoch must exist
+        assert os.path.exists(os.path.join(args.output_dir, f'best_epoch.txt'))
+        with open(os.path.join(args.output_dir, f'best_epoch.txt'), 'r') as f:
+            best_epoch = int(f.read())
+        print(f"Best loss: {best_loss}, Best epoch: {best_epoch} loaded from {args.output_dir}")
+    else:
+        best_loss = 1e10
+        best_epoch = 0
+        print(f"No best loss found in {args.output_dir}, starting from scratch.")
     for epoch in range(start_epoch, args.epochs):
         # data_loader.sampler.set_epoch(epoch)
 
@@ -304,6 +315,15 @@ def train_dino(args):
                 os.remove(os.path.join(args.output_dir, f'checkpoint_best{best_epoch:04}.pth'))
             best_epoch = epoch
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint_best{epoch:04}.pth'))
+
+            # Save best loss and best epoch only from the main process
+            if utils.is_main_process():
+                print(f"Best loss: {best_loss}, Best epoch: {best_epoch} saved in {args.output_dir}")
+                with open(os.path.join(args.output_dir, f'best_loss.txt'), 'w') as f:
+                    f.write(str(best_loss))
+                with open(os.path.join(args.output_dir, f'best_epoch.txt'), 'w') as f:
+                    f.write(str(best_epoch))
+
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      'epoch': epoch}
         if utils.is_main_process():
