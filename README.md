@@ -610,3 +610,22 @@ Then run the code with the following command:
 ```bash
 python -m torch.distributed.launch --nproc_per_node=1 main_dino2k.py --arch vit2k_xs --data_path /path/to/data/SATELLITE/input_2k/ --output_dir /path/to/data/SATELLITE/Checkpoints/ --epochs 200 --batch_size_per_gpu 2 --use_fp16 False --norm_last_layer False --teacher_temp 0.00008 --warmup_teacher_temp 0.00004 --lr 0.0002 --warmup_epochs 10 --warmup_teacher_temp_epochs 199
 ```
+
+
+## Hierarchical Inference (2K Upper Level)
+
+### VENV
+
+As already done in previous steps, create a virtual environment and install the required packages.
+
+Then go to the `Hierarchical_Pretraining` directory in the repo:
+
+```bash
+cd gridrad/Hierarchical_Pretraining/
+```
+
+Then run the code with the following command:
+
+```bash
+python -m torch.distributed.launch --nproc_per_node=1 From_ViT256_to_ViT2k.py --data_path /path/to/data/SATELLITE/Crops/ --pretrained_weights /path/to/data/SATELLITE/Checkpoints_1/checkpoint_bestxxxx.pth --pretrained_weights2k /path/to/data/SATELLITE/Checkpoints_2/checkpoint_bestyyyy.pth --batch_size_per_gpu 4 --output_dir /path/to/data/SATELLITE/output_inference/
+```
