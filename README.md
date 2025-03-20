@@ -533,6 +533,51 @@ python -m torch.distributed.launch --nproc_per_node=1 From_ViT16_to_ViT256.py --
 
 ### APPTAINER
 
+We are running on [ALCF Polaris](https://www.alcf.anl.gov/polaris) at [ALCF](https://www.alcf.anl.gov/), so we need to use `APPTAINER`.
+
+This is the script that we are using to launch the inference process:
+
+```bash
+#!/bin/sh
+#PBS -l select=1:system=polaris
+#PBS -q debug
+#PBS -l place=scatter
+#PBS -l walltime=00:60:00
+#PBS -l filesystems=home:grand
+#PBS -A MultiActiveAI
+
+echo hostname
+hostname
+hostname
+hostname
+hostname
+
+export HTTP_PROXY=http://proxy.alcf.anl.gov:3128
+export HTTPS_PROXY=http://proxy.alcf.anl.gov:3128
+export http_proxy=http://proxy.alcf.anl.gov:3128
+export https_proxy=http://proxy.alcf.anl.gov:3128
+ml use /soft/modulefiles
+ml load spack-pe-base/0.8.1
+ml load apptainer
+ml load e2fsprogs
+
+export CONTAINER=/grand/MultiActiveAI/satellite.sif
+export DATA=/grand/MultiActiveAI/
+export WORKDIR=/home/demattie/gridrad/Hierarchical_Pretraining
+
+cd $WORKDIR
+apptainer exec --nv -B $DATA:/data $CONTAINER python -m torch.distributed.launch --nproc_per_node=4 From_ViT16_to_ViT256.py --data_path /data/SATELLITE/Crops/ --pretrained_weights /data/SATELLITE/Checkpoints_1/checkpoint_best0095.pth --batch_size_per_gpu 16 --output_dir /data/SATELLITE/output_inference/
+```
+
+And we launch the script with the following command:
+
+```bash
+qsub inference_HIPT_1.sh
+```
+
+This script generates the embeddings for the 256 x 256 patches and saves them in the `output_dir` directory.
+
+
 
 ## Hierarchical Pre-training (2K Upper Level)
 
