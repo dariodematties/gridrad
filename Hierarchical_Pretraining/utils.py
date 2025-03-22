@@ -899,8 +899,50 @@ def multi_scale(samples, model):
 #         return sample
 #
 
-# Custom Dataset for tensor files
 class TensorDataset(torch.utils.data.Dataset):
+    def __init__(self, root, transform=None, ext='.pt'):
+        """
+        Args:
+        - root (str): root directory of the dataset
+        - transform (callable, optional): Optional transform to be applied on a sample.
+        - ext (str): extension of the files to be loaded
+        """
+        self.root = root
+        self.transform = transform
+        self.ext = ext
+        # Recursively list all files with the desired extension
+        self.files = self._get_files_recursive(self.root, self.ext)
+
+    def _get_files_recursive(self, directory, ext):
+        file_list = []
+        for root, _, files in os.walk(directory):
+            for file in files:
+                if file.endswith(ext):
+                    file_list.append(os.path.join(root, file))
+        return file_list
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        # Load the data (assumed to be saved with torch.save)
+        data = torch.load(self.files[idx], weights_only=False)
+
+        # Ensure the data is a tensor, convert if necessary
+        if not isinstance(data, torch.Tensor):
+            data = torch.tensor(data)
+
+        # If the tensor is 2D, add a channel dimension (resulting in shape (1,256,256))
+        if data.ndim == 2:
+            data = data.unsqueeze(0)
+
+        if self.transform:
+            data = self.transform(data)
+
+        return data
+
+# Custom Dataset for tensor files
+class TensorDataset_YY(torch.utils.data.Dataset):
     def __init__(self, root, transform=None, ext='.pt'):
         """
         Args:
@@ -918,7 +960,8 @@ class TensorDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         # Load the tensor (assumed to be saved with torch.save)
-        tensor = torch.load(self.files[idx])
+        tensor = torch.load(self.files[idx], weights_only=False)
+        tensor = torch.tensor(tensor)
         # If the tensor is 2D, add a channel dimension (resulting in shape (1,256,256))
         if tensor.ndim == 2:
             tensor = tensor.unsqueeze(0)
