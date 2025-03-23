@@ -6,7 +6,7 @@ import os
 import argparse
 
 import utils
-from utils import TensorDataset1
+from utils import TensorDataset1, TensorDatasetInference
 
 import torch
 import torch.nn as nn
@@ -93,7 +93,8 @@ def inference_on_pretrained_model(args):
     cudnn.benchmark = True
 
     # ============ loading data ============
-    dataset = TensorDataset1(args.data_path)
+    dataset = TensorDatasetInference(args.data_path)
+    # dataset = TensorDataset1(args.data_path)
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=False)
     # data_loader = torch.utils.data.DataLoader(
     #     dataset,
