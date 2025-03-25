@@ -9,7 +9,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import concurrent
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from tqdm import tqdm
+from multiprocessing import Pool
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def print_netcdf_info(file_path):
     """
@@ -45,9 +48,6 @@ def print_netcdf_info(file_path):
         print(f"Error: File not found at {file_path}")
     except Exception as e:
         print(f"An error occurred: {e}")
-
-
-
 
 def open_netcdf(file_path):
     """
@@ -434,435 +434,172 @@ def process_directory_tree(input_dir, output_dir, checkpoint_file, n_workers=4, 
     print("Processing complete.")
     return results
 
-def process_file(file_path):
-    """
-    Load and process a single npz file.
-    Uses a context manager with np.load so resources are released promptly.
-    Returns the file path along with the processed crops and patches arrays.
-    """
-    with np.load(file_path) as data:
-        crops = data['crop']  # e.g. (2, 2048, 2048) or (1, 2048, 2048)
-        patches = data['patches']  # e.g. (8,8,C,256,256)
-        patches_reshaped = patches.reshape(-1, patches.shape[-2], patches.shape[-1])
-    return file_path, crops, patches_reshaped
+def process_file(args):
+    file_path, output_folder = args
+    filename = os.path.basename(file_path)
+    base_filename = filename.replace('.npz', '')
 
-def get_next_chunk_index(folder_path, crops_prefix='crops_', ext='.pt'):
-    """
-    Determine the next available chunk index by listing files that start with crops_
-    (e.g. crops_1.pt, crops_2.pt, …) and returning the next index.
-    """
-    existing = [f for f in os.listdir(folder_path) if f.startswith(crops_prefix) and f.endswith(ext)]
-    indices = []
-    for fname in existing:
-        try:
-            idx = int(fname[len(crops_prefix):-len(ext)])
-            indices.append(idx)
-        except ValueError:
-            pass
-    return max(indices) + 1 if indices else 1
+    data = np.load(file_path)
 
-def flush_chunk(folder_path, partial_crops_list, partial_patches_list):
-    """
-    Concatenate the partial lists, save them as a new chunk,
-    and then clear the lists.
-    """
-    combined_crops = np.concatenate(partial_crops_list, axis=0)
-    combined_patches = np.concatenate(partial_patches_list, axis=0)
-    
-    chunk_index = get_next_chunk_index(folder_path)
-    crops_chunk_name = f"crops_{chunk_index}.pt"
-    patches_chunk_name = f"patches_{chunk_index}.pt"
-    crops_chunk_path = os.path.join(folder_path, crops_chunk_name)
-    patches_chunk_path = os.path.join(folder_path, patches_chunk_name)
-    
-    # Save the chunks
-    torch.save(torch.from_numpy(combined_crops), crops_chunk_path)
-    torch.save(torch.from_numpy(combined_patches), patches_chunk_path)
-    print(f"Saved chunk {chunk_index}: crops {combined_crops.shape}, patches {combined_patches.shape}")
-    
-    # Clear memory: clear the lists and delete temporary variables.
-    partial_crops_list.clear()
-    partial_patches_list.clear()
-    del combined_crops, combined_patches
-    gc.collect()
+    crops_folder = os.path.join(output_folder, 'crops')
+    patches_folder = os.path.join(output_folder, 'patches')
 
-def process_npz_files_progressive(folder_path, 
-                                  files_per_chunk=5,
-                                  crops_partial_name='crops_partial.pt',
-                                  patches_partial_name='patches_partial.pt',
-                                  checkpoint_filename='checkpoint.txt'):
-    """
-    Process npz files in parallel, but accumulate data in memory only in chunks.
-    Uses a checkpoint file and partial chunk files so that processing can resume.
-    """
-    checkpoint_path = os.path.join(folder_path, checkpoint_filename)
-    
-    # Load processed files from checkpoint if it exists
-    processed_files = set()
-    if os.path.exists(checkpoint_path):
-        with open(checkpoint_path, 'r') as f:
-            processed_files = {line.strip() for line in f if line.strip()}
-        print(f"Resuming: {len(processed_files)} files already processed.")
-    
-    # List all npz files and filter out already processed ones
-    all_npz_files = sorted([os.path.join(folder_path, f)
-                            for f in os.listdir(folder_path) if f.endswith('.npz')])
-    remaining_files = [f for f in all_npz_files if f not in processed_files]
-    print(f"Total files: {len(all_npz_files)}. Remaining: {len(remaining_files)}.")
-    
-    # Paths for partial (incomplete chunk) files
-    crops_partial_path = os.path.join(folder_path, crops_partial_name)
-    patches_partial_path = os.path.join(folder_path, patches_partial_name)
-    
-    # Initialize accumulators for the current chunk.
-    partial_crops_list = []
-    partial_patches_list = []
-    partial_file_count = 0
-    
-    # Try to resume from a saved partial chunk (if available)
-    if os.path.exists(crops_partial_path) and os.path.exists(patches_partial_path):
-        try:
-            existing_crops = torch.load(crops_partial_path).numpy()
-            existing_patches = torch.load(patches_partial_path).numpy()
-            partial_crops_list.append(existing_crops)
-            partial_patches_list.append(existing_patches)
-            # Optionally, you might record how many files these correspond to.
-            print(f"Loaded partial chunk: crops {existing_crops.shape}, patches {existing_patches.shape}")
-            del existing_crops, existing_patches
-            gc.collect()
-        except Exception as e:
-            print(f"Error loading partial chunk: {e}. Starting fresh for partial chunk.")
-    
-    # Process files in parallel.
-    with ProcessPoolExecutor() as executor:
-        future_to_file = {executor.submit(process_file, file_path): file_path 
-                          for file_path in remaining_files}
-        for future in as_completed(future_to_file):
-            file_path = future_to_file[future]
-            try:
-                fname, crops, patches = future.result()
-            except Exception as exc:
-                print(f"Error processing {file_path}: {exc}")
-                continue
-            
-            # Append the processed arrays to the partial lists
-            partial_crops_list.append(crops)
-            partial_patches_list.append(patches)
-            partial_file_count += 1
-            
-            # Update the checkpoint file with the newly processed file
-            with open(checkpoint_path, 'a') as cp_file:
-                cp_file.write(fname + "\n")
-            
-            print(f"Processed {fname} (added to current chunk; count = {partial_file_count}).")
-            
-            # Save the current partial chunk to disk so that progress is not lost.
-            try:
-                combined_crops = np.concatenate(partial_crops_list, axis=0)
-                combined_patches = np.concatenate(partial_patches_list, axis=0)
-                torch.save(torch.from_numpy(combined_crops), crops_partial_path)
-                torch.save(torch.from_numpy(combined_patches), patches_partial_path)
-                print(f"Updated partial chunk on disk: crops {combined_crops.shape}, patches {combined_patches.shape}")
-                del combined_crops, combined_patches
-                gc.collect()
-            except Exception as e:
-                print(f"Error saving partial chunk: {e}")
-            
-            # If the accumulated number of files reaches the threshold, flush them as a new chunk.
-            if partial_file_count >= files_per_chunk:
-                flush_chunk(folder_path, partial_crops_list, partial_patches_list)
-                partial_file_count = 0
-                
-                # Remove the partial chunk files (they have been flushed)
-                if os.path.exists(crops_partial_path):
-                    os.remove(crops_partial_path)
-                if os.path.exists(patches_partial_path):
-                    os.remove(patches_partial_path)
-    
-    # Flush any remaining partial data as a final chunk.
-    if partial_file_count > 0:
-        flush_chunk(folder_path, partial_crops_list, partial_patches_list)
-        if os.path.exists(crops_partial_path):
-            os.remove(crops_partial_path)
-        if os.path.exists(patches_partial_path):
-            os.remove(patches_partial_path)
-    else:
-        print("No remaining partial data to flush.")
+    os.makedirs(crops_folder, exist_ok=True)
+    os.makedirs(patches_folder, exist_ok=True)
 
-def process_chunk_file(chunk_file_path, file_type,
-                         max_deviation_factor=3.0,
-                         global_stats=None, global_lock=None,
-                         global_mean_deviation_factor=3.0):
-    """
-    Worker function to process one chunk file.
+    # Process 'crop' array
+    crops = data['crop']
+    num_channels = crops.shape[0]
 
-    Parameters:
-      chunk_file_path: Full path of the chunk file (e.g., 'crops_1.pt' or 'patches_2.pt').
-      file_type: A string, either 'crop' or 'patch'.
-      max_deviation_factor: Local threshold; a slice is discarded if the maximum absolute deviation
-                            from its mean exceeds this factor times its standard deviation.
-      global_stats: A shared dictionary (via Manager) holding keys "sum", "square_sum", "count"
-                    for computing the running mean of accepted slice means.
-      global_lock:  A multiprocessing Lock to synchronize updates to global_stats.
-      global_mean_deviation_factor: Global threshold; a slice is discarded if its mean deviates
-                                    from the current global mean by more than this factor times the
-                                    global standard deviation.
-                                    
-    The function:
-      1. Loads the tensor from chunk_file_path.
-      2. For each slice (i.e. along the first dimension):
-         - Discards it if it contains any NaN values.
-         - Computes its own mean and std; if the maximum absolute deviation from its mean is
-           larger than max_deviation_factor * std, it is discarded.
-         - If global_stats is provided and already contains accepted data (count > 0),
-           the slice is rejected if |slice_mean - global_mean| > global_mean_deviation_factor * global_std.
-         - If accepted, updates global_stats (under lock) and saves the slice as an individual file.
-      3. Removes the original chunk file.
-      4. Clears memory and returns the processed chunk_file_path.
-    """
-    try:
-        tensor = torch.load(chunk_file_path)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load {chunk_file_path}: {e}")
-    
-    # Extract chunk index (assumes filename pattern like: crops_3.pt)
-    base_name = os.path.basename(chunk_file_path)
-    try:
-        chunk_index = base_name.split('_')[1].split('.')[0]
-    except Exception as e:
-        raise ValueError(f"Unexpected filename format for {base_name}: {e}")
-    
-    num_items = tensor.shape[0]
-    valid_count = 0  # Counter for accepted slices (for naming individual files)
-    for i in range(num_items):
-        item = tensor[i]
-        # --- Local checks: discard if any NaN ---
-        if torch.isnan(item).any():
-            print(f"Skipping {file_type} from chunk {chunk_index} at index {i} due to NaN values.")
-            continue
-        
-        # --- Local statistical check based on the slice's own stats ---
-        item_mean = torch.mean(item).item()
-        item_std = torch.std(item).item()
-        if item_std > 0:
-            # Here we compute the maximum absolute deviation from the slice's mean.
-            # (Converting torch.max(item - item_mean) to a python float.)
-            max_dev = torch.max(torch.abs(item - item_mean)).item()
-            if max_dev > max_deviation_factor * item_std:
-                print(f"Skipping {file_type} from chunk {chunk_index} at index {i} due to extreme local deviation (max_dev={max_dev:.3f}, threshold={max_deviation_factor * item_std:.3f}).")
-                continue
+    for n in range(num_channels):
+        crop_tensor = torch.from_numpy(crops[n])
+        crop_filename = f"{base_filename}_crop_{n}.pt"
+        torch.save(crop_tensor, os.path.join(crops_folder, crop_filename))
 
-        # --- Global mean check ---
-        # If global_stats has been initialized and at least one slice has been accepted:
-        if global_stats is not None and global_lock is not None:
-            with global_lock:
-                count = global_stats["count"]
-                if count > 0:
-                    g_mean = global_stats["sum"] / count
-                    g_var = (global_stats["square_sum"] / count) - (g_mean ** 2)
-                    if g_var < 0:
-                        g_var = 0.0
-                    g_std = g_var ** 0.5
-                else:
-                    g_mean = item_mean
-                    g_std = 0.0
-            if count > 0 and g_std > 0:
-                if abs(item_mean - g_mean) > global_mean_deviation_factor * g_std:
-                    print(f"Skipping {file_type} from chunk {chunk_index} at index {i} due to global mean deviation (slice mean={item_mean:.3f}, global mean={g_mean:.3f}, threshold={global_mean_deviation_factor * g_std:.3f}).")
-                    continue
+    # Process 'patches' array
+    patches = data['patches']  # Shape: (8, 8, channels, 256, 256)
+    for i in range(patches.shape[0]):
+        for j in range(patches.shape[1]):
+            for c in range(num_channels):
+                patch_tensor = torch.from_numpy(patches[i, j, c])
+                patch_filename = f"{base_filename}_patch_{i}_{j}_{c}.pt"
+                torch.save(patch_tensor, os.path.join(patches_folder, patch_filename))
 
-        # --- If passed all checks, update global_stats ---
-        if global_stats is not None and global_lock is not None:
-            with global_lock:
-                global_stats["sum"] += item_mean
-                global_stats["square_sum"] += item_mean ** 2
-                global_stats["count"] += 1
 
-        # --- Save the accepted slice as an individual file ---
-        out_file = os.path.join(os.path.dirname(chunk_file_path),
-                                f"{file_type}_{chunk_index}_{valid_count}.pt")
-        try:
-            torch.save(item, out_file)
-        except Exception as e:
-            raise RuntimeError(f"Error saving {out_file}: {e}")
-        valid_count += 1
+def process_npz_folder_parallel(input_folder, output_folder, checkpoint_file='processed_files.txt'):
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
 
-    # Remove the original chunk file after processing.
-    try:
-        os.remove(chunk_file_path)
-    except Exception as e:
-        raise RuntimeError(f"Error removing {chunk_file_path}: {e}")
-    
-    # Free memory and force garbage collection.
-    del tensor
-    gc.collect()
-    return chunk_file_path
-
-def process_chunk_files_parallel(folder_path, type_prefix, file_type,
-                                 checkpoint_filename,
-                                 max_deviation_factor=3.0,
-                                 global_stats=None, global_lock=None,
-                                 global_mean_deviation_factor=3.0):
-    """
-    Processes all chunk files of a given type (e.g., "crops" or "patches") in parallel.
-    
-    Parameters:
-      folder_path: Folder where the chunk files are stored.
-      type_prefix: The prefix of the chunk files (e.g., "crops" for crops_*.pt).
-      file_type: The singular form used for individual file names (e.g., "crop").
-      checkpoint_filename: Name of the checkpoint file for this type.
-      max_deviation_factor: Local threshold for discarding a slice (as in process_chunk_file).
-      global_stats: Shared dictionary holding global statistics (via Manager).
-      global_lock: Lock for synchronizing updates to global_stats.
-      global_mean_deviation_factor: Threshold for discarding a slice whose mean deviates too much from the global mean.
-    
-    This function:
-      - Reads the checkpoint file to skip already processed chunk files.
-      - Lists all chunk files matching type_prefix.
-      - Processes the unprocessed chunk files in parallel (each using process_chunk_file).
-      - Updates the checkpoint file as each chunk file is processed.
-    """
-    checkpoint_path = os.path.join(folder_path, checkpoint_filename)
-    processed_chunks = set()
-    if os.path.exists(checkpoint_path):
-        with open(checkpoint_path, 'r') as f:
-            processed_chunks = {line.strip() for line in f if line.strip()}
-        print(f"[{file_type}] Resuming: {len(processed_chunks)} chunk files already processed.")
-
-    # List all chunk files for the given type.
-    all_chunk_files = sorted([
-        os.path.join(folder_path, f)
-        for f in os.listdir(folder_path)
-        if f.startswith(type_prefix + "_") and f.endswith(".pt")
+    all_files = sorted([
+        os.path.join(input_folder, f) for f in os.listdir(input_folder)
+        if f.endswith('.npz')
     ])
-    remaining_files = [f for f in all_chunk_files if f not in processed_chunks]
-    print(f"[{file_type}] Total chunk files: {len(all_chunk_files)}. Remaining to process: {len(remaining_files)}.")
 
-    with ProcessPoolExecutor() as executor:
-        future_to_file = {
-            executor.submit(process_chunk_file, file_path, file_type,
-                            max_deviation_factor, global_stats, global_lock,
-                            global_mean_deviation_factor): file_path
-            for file_path in remaining_files
-        }
-        for future in as_completed(future_to_file):
-            file_path = future_to_file[future]
-            try:
-                processed_file = future.result()
-                # Update the checkpoint file.
-                with open(checkpoint_path, 'a') as cp:
-                    cp.write(processed_file + "\n")
-                print(f"[{file_type}] Processed and removed chunk file: {processed_file}")
-            except Exception as exc:
-                print(f"[{file_type}] Chunk file {file_path} generated an exception: {exc}")
+    processed_files = set()
 
-def process_all_chunks_to_individual_files(folder_path,
-                                           crops = False,
-                                           patches = False,
-                                           max_deviation_factor=3.0,
-                                           global_mean_deviation_factor=3.0):
-    """
-    Main function to process both crops and patches chunk files.
+    if os.path.exists(checkpoint_file):
+        with open(checkpoint_file, 'r') as f:
+            processed_files = set(line.strip() for line in f)
 
-    For each type, it calls process_chunk_files_parallel with all thresholds and
-    with shared global statistics for filtering based on the global mean of accepted slices.
-    After processing, each original chunk file is removed and individual files (without NaNs,
-    without extreme local deviations, and whose means are close to the global mean) are saved.
+    files_to_process = [f for f in all_files if os.path.basename(f) not in processed_files]
 
-    Parameters:
-      folder_path: The folder containing the chunk files.
-      max_deviation_factor: Local threshold for a slice’s maximum deviation.
-      global_mean_deviation_factor: Global threshold for discarding a slice whose mean deviates too much.
-    """
-    # Create a Manager for shared global statistics.
-    manager = multiprocessing.Manager()
-    # Initialize the global statistics: we'll track the sum of slice means, sum of squares, and count.
-    global_stats = manager.dict({"sum": 0.0, "square_sum": 0.0, "count": 0})
-    global_lock = manager.Lock()
+    with Pool(processes=multiprocessing.cpu_count()) as pool:
+        for file in tqdm(pool.imap_unordered(process_file, [(f, output_folder) for f in files_to_process]), total=len(files_to_process)):
+            with open(checkpoint_file, 'a') as f:
+                f.write(os.path.basename(files_to_process.pop(0)) + '\n')
 
-    # Process crops if crops=True
-    if crops:
-        process_chunk_files_parallel(
-            folder_path=os.path.join(folder_path, "Crops"),
-            type_prefix="crops",          # e.g., crops_1.pt, crops_2.pt, ...
-            file_type="crop",             # individual files will be named like crop_1_0.pt, etc.
-            checkpoint_filename="processed_crop_chunks.txt",
-            max_deviation_factor=max_deviation_factor,
-            global_stats=global_stats,
-            global_lock=global_lock,
-            global_mean_deviation_factor=global_mean_deviation_factor
-        )
+def sanity_check_pt_files(
+    folder_path,
+    local_std_threshold=3,
+    global_std_threshold=5,
+    num_workers=4,
+    checkpoint_file='sanity_checkpoint.txt',
+    diagnosis_file='sanity_diagnosis.txt',
+    dry_run=False,
+    flush_interval=50,
+):
+    # List all .pt files in the directory
+    files = [f for f in os.listdir(folder_path) if f.endswith('.pt')]
 
-    # Process patches if patches=True
-    if patches:
-        process_chunk_files_parallel(
-            folder_path=os.path.join(folder_path, "Patches"),
-            type_prefix="patches",        # e.g., patches_1.pt, patches_2.pt, ...
-            file_type="patch",            # individual files will be named like patch_1_0.pt, etc.
-            checkpoint_filename="processed_patch_chunks.txt",
-            max_deviation_factor=max_deviation_factor,
-            global_stats=global_stats,
-            global_lock=global_lock,
-            global_mean_deviation_factor=global_mean_deviation_factor
-        )
+    # Load the set of already processed files from the checkpoint
+    checked_files = set()
+    if os.path.exists(checkpoint_file):
+        with open(checkpoint_file, 'r') as f:
+            checked_files = set(line.strip() for line in f)
 
-def check_and_remove_file(file_path):
-    """
-    Attempts to load the tensor file. If loading fails, attempts to remove the file.
-    
-    Args:
-        file_path (str): Full path to the tensor file.
-    
-    Returns:
-        str or None: Returns file_path if the file failed to load (and was removed), or
-                     None if the file loaded successfully.
-    """
-    try:
-        # Try loading the tensor file.
-        _ = torch.load(file_path)
-        return None
-    except Exception as e:
-        # If loading fails, try to remove the file.
+    files_to_check = [f for f in files if f not in checked_files]
+
+    local_summaries = []
+    diagnosis_log = []
+
+    # Function to check individual file integrity and local deviation
+    def check_file(file_name):
+        file_path = os.path.join(folder_path, file_name)
         try:
-            os.remove(file_path)
-            print(f"Removed file: {file_path}")
-        except Exception as remove_e:
-            print(f"Failed to remove file {file_path}: {remove_e}")
-        # Return the file path as a record of the failure.
-        return file_path
+            tensor = torch.load(file_path)
+            if not torch.is_tensor(tensor):
+                raise ValueError("Not a tensor")
 
-def check_and_remove_tensor_files_parallel(root_dir, output_file, ext='.pt'):
-    """
-    Iterates over files in root_dir with the given extension, attempts to load them using torch.load
-    in parallel using available CPUs. Files that fail to load are removed from disk and their names 
-    are logged into a text file.
-    
-    Args:
-        root_dir (str): Directory where the tensor files are stored.
-        output_file (str): Path to the text file to save the list of files that failed to load.
-        ext (str): File extension to check (default is '.pt').
-    """
-    # List all files with the specified extension.
-    file_list = [os.path.join(root_dir, f) for f in os.listdir(root_dir) if f.endswith(ext)]
-    print(f"Found {len(file_list)} files with extension '{ext}' in {root_dir}.")
-    
-    failed_files = []
-    
-    # Use as many processes as available.
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        # Submit all file checks concurrently.
-        futures = {executor.submit(check_and_remove_file, file_path): file_path for file_path in file_list}
-        
-        # Collect results as they complete.
-        for future in concurrent.futures.as_completed(futures):
+            arr = tensor.numpy()
+            local_mean = np.mean(arr)
+            local_std = np.std(arr)
+
+            # Check if values deviate beyond local threshold
+            if np.any(np.abs(arr - local_mean) > local_std_threshold * local_std):
+                if not dry_run:
+                    os.remove(file_path)
+                return file_name, 'Marked for removal (Local Deviation)', None, None
+
+            return file_name, 'Valid', local_mean, local_std
+        except Exception as e:
+            # Remove corrupt or invalid tensor files
+            if os.path.exists(file_path) and not dry_run:
+                os.remove(file_path)
+            return file_name, f'Marked for removal (Loading error: {e})', None, None
+
+    # Parallel processing of files (First pass to calculate global statistics)
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(check_file, f): f for f in files_to_check}
+        processed_count = 0
+
+        for future in as_completed(futures):
+            file_name, status, mean_val, std_val = future.result()
+            processed_count += 1
+
+            if status != 'Valid':
+                diagnosis_log.append(f'{file_name}: {status}')
+            elif mean_val is not None:
+                local_summaries.append((file_name, mean_val, std_val))
+
+            # Update checkpoint
+            with open(checkpoint_file, 'a') as f:
+                f.write(f'{file_name}\n')
+
+            if processed_count % flush_interval == 0:
+                gc.collect()
+
+    # Compute global mean and std from local summaries
+    global_means = [summary[1] for summary in local_summaries]
+    global_mean = np.mean(global_means)
+    global_std = np.std(global_means)
+
+    # Second pass to check global deviation
+    def global_check(file_name):
+        file_path = os.path.join(folder_path, file_name)
+        tensor = torch.load(file_path)
+        arr = tensor.numpy()
+
+        if np.any(np.abs(arr - global_mean) > global_std_threshold * global_std):
+            if not dry_run:
+                os.remove(file_path)
+            return f'{file_name}: Marked for removal (Global Deviation)'
+
+        return None
+
+    remaining_files = [summary[0] for summary in local_summaries]
+    diagnosis_log_global = []
+
+    # Parallel processing for global deviation check
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(global_check, f): f for f in remaining_files}
+        processed_count = 0
+
+        for future in as_completed(futures):
             result = future.result()
-            if result is not None:
-                failed_files.append(result)
-    
-    # Write the names of failed files to the output text file.
-    with open(output_file, 'w') as f:
-        for file_name in failed_files:
-            f.write(file_name + "\n")
-    
-    print(f"Finished processing files. {len(failed_files)} file(s) failed to load and were removed. See '{output_file}' for details.")
+            processed_count += 1
 
+            if result:
+                diagnosis_log_global.append(result)
+
+            if processed_count % flush_interval == 0:
+                gc.collect()
+
+    total_removed = len(diagnosis_log) + len(diagnosis_log_global)
+
+    # Write all diagnosis entries to the diagnosis file
+    with open(diagnosis_file, 'w') as f:
+        for entry in diagnosis_log + diagnosis_log_global:
+            f.write(entry + '\n')
+
+    action = "Simulation" if dry_run else "Sanity check"
+    print(f"{action} complete. Total files marked for removal: {total_removed}")
