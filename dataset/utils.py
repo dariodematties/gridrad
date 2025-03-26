@@ -498,6 +498,10 @@ def sanity_check_pt_files(
     dry_run=False,
     flush_interval=50,
 ):
+    # Ensure diagnosis file always exists (even if empty)
+    with open(diagnosis_file, 'w') as f:
+        pass
+
     # List all .pt files in the directory
     files = [f for f in os.listdir(folder_path) if f.endswith('.pt')]
 
@@ -510,7 +514,6 @@ def sanity_check_pt_files(
     files_to_check = [f for f in files if f not in checked_files]
 
     local_summaries = []
-    diagnosis_log = []
 
     # Function to check individual file integrity and local deviation
     def check_file(file_name):
@@ -547,7 +550,8 @@ def sanity_check_pt_files(
             processed_count += 1
 
             if status != 'Valid':
-                diagnosis_log.append(f'{file_name}: {status}')
+                with open(diagnosis_file, 'a') as diag_f:
+                    diag_f.write(f'{file_name}: {status}\n')
             elif mean_val is not None:
                 local_summaries.append((file_name, mean_val, std_val))
 
@@ -577,7 +581,6 @@ def sanity_check_pt_files(
         return None
 
     remaining_files = [summary[0] for summary in local_summaries]
-    diagnosis_log_global = []
 
     # Parallel processing for global deviation check
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -589,17 +592,15 @@ def sanity_check_pt_files(
             processed_count += 1
 
             if result:
-                diagnosis_log_global.append(result)
+                with open(diagnosis_file, 'a') as diag_f:
+                    diag_f.write(result + '\n')
 
             if processed_count % flush_interval == 0:
                 gc.collect()
 
-    total_removed = len(diagnosis_log) + len(diagnosis_log_global)
-
-    # Write all diagnosis entries to the diagnosis file
-    with open(diagnosis_file, 'w') as f:
-        for entry in diagnosis_log + diagnosis_log_global:
-            f.write(entry + '\n')
+    # Count total removed files
+    with open(diagnosis_file, 'r') as f:
+        total_removed = sum(1 for _ in f)
 
     action = "Simulation" if dry_run else "Sanity check"
     print(f"{action} complete. Total files marked for removal: {total_removed}")

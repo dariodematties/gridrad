@@ -191,62 +191,62 @@ Then from there run `python` and follow the steps in the script.
 ```python
 from utils import process_directory_tree
 input_dir = '/data/GridRad/'
-output_dir = '/data/Output/'
+output_dir = '/data/output_npz/'
 process_directory_tree(input_dir=input_dir, output_dir=output_dir, checkpoint_file='checkpoint_file', n_workers=10)
 ```
 
-Now you have already abunch of `.npz` files in the `/data/Output/` directory.
-In order to conduct the preprocessing, you need to have such data in the `/data/Ouput/` directory.
+Now you have already abunch of `.npz` files in the `/data/output_npz/` directory.
+In order to conduct the preprocessing, you need to have such data in the `/data/output_npz/` directory.
 
 The preprocessing script is simply taking the `.npz` files and converting them into `.pt` files, ready to be used in the training process.
 For instance, in each `.npz` file, you have the following
 a crop of shape `(C, 2048, 2048)` and patches of shape `(8, 8, C, 256, 256)`, where `C` is the number of channels (e.g. 1 or 2).
 
-The following script will read the `.npz` files one by one, and then compose two tensors, one for the crop and one for the patches.
-The crops tensor will have a shape of `(M, 2048, 2048)`, where `M` is the total number of channels collected though the iteration.
-The patches tensor will have a shape of `(N, 256, 256)`, where `N` is the total number of patches collected through the iteration (somehting about `8 x 8 x C x` the number of `.npz` files.
+The following script will read the `.npz` files one by one, and then compose two kind of tensors, one for the crop and one for the patches.
+The crops tensor will have a shape of `(2048, 2048)`.
+The patches tensor will have a shape of `(256, 256)`.
 
 
 ```python
-from utils import process_npz_files_progressive
-directory_path = '/data/Output/'
-process_npz_files_progressive(directory_path)
+from utils import process_npz_folder_parallel
+input_folder = '/data/output_npz/'
+output_folder = "/data/output_folder/"
+process_npz_folder_parallel(input_folder, output_folder)
 ```
 
-This script will run in parallel and will save the `.pt` files in the same directory as the `.npz` files.
+This script will create two paths in the output folder, one for the crops and one for the patches (i.e. `output_folder/crops/` and `output_folder/patches/`).
+In each of those paths, you will find the corresponding `.pt` files for the crops and patches respectively (i.e. one `.pt` file for each crop and one `.pt` file for each patch).
 
-If you want to form a proper dataset you have to locate each pytorch tensor in a file.
-You can do it with the following script:
-
-This is for locating mono-channel crops tensors in individual files.
+Finally, you can run the following script to conduct a sanity check on the `.pt` files generated from the previous step.
+This sanity check will test if the individual `.pt` files are corrupted or not and will also check for statistical sanity in the data such as values in the arrays has to be inside certain number of std deviations from the mean.
 
 ```python
-from utils import process_all_chunks_to_individual_files
-folder_path = '/path/to/data/' # inside data there should be a folder called Crops
-# You can adjust the thresholds as needed.
-process_all_chunks_to_individual_files(folder_path,
-                                       crops=True,
-                                       max_deviation_factor=10,
-                                       global_mean_deviation_factor=10)
+from utils import sanity_check_pt_files
+
+# Sanity check on crops
+sanity_check_pt_files(
+    folder_path = '/data/SATELLITE/output_folder/crops/',
+    local_std_threshold=1e4,
+    global_std_threshold=1e4,
+    num_workers=4,
+    checkpoint_file='crops_sanity_checkpoint.txt',
+    diagnosis_file='crops_sanity_diagnosis.txt',
+    dry_run=True,
+)
+
+# Sanity check on patches
+sanity_check_pt_files(
+    folder_path = '/data/SATELLITE/output_folder/patches/',
+    local_std_threshold=1e4,
+    global_std_threshold=1e4,
+    num_workers=4,
+    checkpoint_file='patches_sanity_checkpoint.txt',
+    diagnosis_file='patches_sanity_diagnosis.txt',
+    dry_run=True,
+)
 ```
 
-This is for locating mono-channel patches tensors in individual files.
-
-```python
-from utils import process_all_chunks_to_individual_files
-folder_path = '/path/to/data/' # inside data there should be a folder called Patches
-# You can adjust the thresholds as needed.
-process_all_chunks_to_individual_files(folder_path,
-                                       patches=True,
-                                       max_deviation_factor=10,
-                                       global_mean_deviation_factor=10)
-```
-
-The `max_deviation_factor` is the maximum deviation factor in the tensor values to be considered as a valid tensor.
-The `global_mean_deviation_factor` is the maximum deviation factor in the tensor values to be considered as a valid tensor, considering the global mean of several tensors.
-
-Some of those tensors break the training process, so it is important to filter them out.
-They basically have a very high or very low value, which produces a NaN in the loss function.
+The argument `dry_run=True` will instruct the script to not delete any of the files, but just to print out the names of the files that are corrupted or have values outside the specified thresholds. This argument is useful for debugging purposes and is set to `False` by default, which means that the script will delete any corrupted files or files with values outside the specified thresholds. The `checkpoint_file` argument is used to store the names of the files that have been processed so far, so that the script can resume from where it left off in case of an interruption. The `diagnosis_file` argument is used to store the names of the files that are corrupted or have values outside the specified thresholds. The `local_std_threshold` and `global_std_threshold` arguments are used to specify the thresholds for the local and global standard deviations respectively. These thresholds are used to determine if the values in the arrays are within a certain number of standard deviations from the mean. Tese are basically file rejection thresholds.
 
 
 ### APPTAINER
@@ -321,7 +321,7 @@ Could not open PYTHONSTARTUP
 FileNotFoundError: [Errno 2] No such file or directory: '/etc/pythonstart'
 >>> from utils import process_directory_tree
 >>> input_dir = '/data/SATELLITE/asdc.larc.nasa.gov'
->>> output_dir = '/data/SATELLITE/Output'
+>>> output_dir = '/data/SATELLITE/output_npz'
 >>> process_directory_tree(input_dir=input_dir, output_dir=output_dir, checkpoint_file='checkpoint_file', n_workers=100)
 ```
 
@@ -337,39 +337,24 @@ In the following figures we can see the results of the preprocessing step.
 Then, as we previously explained you can run the following script to convert the `.npz` files into `.pt` files:
 
 ```python
-from utils import process_npz_files_progressive
-directory_path = '/data/Output/'
-process_npz_files_progressive(directory_path)
+from utils import process_npz_folder_parallel
+input_folder = '/data/SATELLITE/output_npz/'
+output_folder = "/data/SATELLITE/output_folder/"
+process_npz_folder_parallel(input_folder, output_folder)
 ```
 
-And also, you can run the following script to locate the tensors in individual files:
+This script will create two paths in the output folder, one for the crops and one for the patches (i.e. `output_folder/crops/` and `output_folder/patches/`).
+In each of those paths, you will find the corresponding `.pt` files for the crops and patches respectively (i.e. one `.pt` file for each crop and one `.pt` file for each patch).
 
-```python
-from utils import process_all_chunks_to_individual_files
-folder_path = '/path/to/data/' # inside data there should be a folder called Crops
-# You can adjust the thresholds as needed.
-process_all_chunks_to_individual_files(folder_path,
-                                       crops=True,
-                                       max_deviation_factor=10,
-                                       global_mean_deviation_factor=10)
-```
 
-```python
-from utils import process_all_chunks_to_individual_files
-folder_path = '/path/to/data/' # inside data there should be a folder called Patches
-# You can adjust the thresholds as needed.
-process_all_chunks_to_individual_files(folder_path,
-                                       patches=True,
-                                       max_deviation_factor=10,
-                                       global_mean_deviation_factor=10)
-```
+The argument `dry_run=True` will instruct the script to not delete any of the files, but just to print out the names of the files that are corrupted or have values outside the specified thresholds. This argument is useful for debugging purposes and is set to `False` by default, which means that the script will delete any corrupted files or files with values outside the specified thresholds. The `checkpoint_file` argument is used to store the names of the files that have been processed so far, so that the script can resume from where it left off in case of an interruption. The `diagnosis_file` argument is used to store the names of the files that are corrupted or have values outside the specified thresholds. The `local_std_threshold` and `global_std_threshold` arguments are used to specify the thresholds for the local and global standard deviations respectively. These thresholds are used to determine if the values in the arrays are within a certain number of standard deviations from the mean. Tese are basically file rejection thresholds.
 
 These scripts run in parallel and have a checkpoint mechanism to avoid reprocessing the same files in case the process is interrupted prematurely.
 
 
 ### Check and remove corrupt tensor files 
 
-Iterates over files in `root_dir` with the given extension, attempts to load them using `torch.load`
+Iterates over files in `folder_path` with the given extension, attempts to load them using `torch.load`
 in parallel using available CPUs. Files that fail to load are removed from disk and their names 
 are logged into a text file in order to keep track of them.
 
@@ -384,12 +369,30 @@ cd gridrad/dataset/
 Then run the following code:
 
 ```python
-from utils import check_and_remove_tensor_files_parallel
-root_dir = '/path/to/data/SATELLITE/Patches/'
-output_file = '/path/to/data/SATELLITE/Patches/corrupted_files.txt'
-check_and_remove_tensor_files_parallel(root_dir, output_file)
-```
+from utils import sanity_check_pt_files
 
+# Sanity check on crops
+sanity_check_pt_files(
+    folder_path = '/data/SATELLITE/output_folder/crops/',
+    local_std_threshold=1e4,
+    global_std_threshold=1e4,
+    num_workers=4,
+    checkpoint_file='crops_sanity_checkpoint.txt',
+    diagnosis_file='crops_sanity_diagnosis.txt',
+    dry_run=True,
+)
+
+# Sanity check on patches
+sanity_check_pt_files(
+    folder_path = '/data/SATELLITE/output_folder/patches/',
+    local_std_threshold=1e4,
+    global_std_threshold=1e4,
+    num_workers=4,
+    checkpoint_file='patches_sanity_checkpoint.txt',
+    diagnosis_file='patches_sanity_diagnosis.txt',
+    dry_run=True,
+)
+```
 
 ## Hierarchical Pre-training
 
@@ -654,6 +657,129 @@ Then run the code with the following command:
 
 ```bash
 python -m torch.distributed.launch --nproc_per_node=1 main_dino2k.py --arch vit2k_xs --data_path /path/to/data/SATELLITE/input_2k/ --output_dir /path/to/data/SATELLITE/Checkpoints/ --epochs 200 --batch_size_per_gpu 2 --use_fp16 False --norm_last_layer False --teacher_temp 0.00008 --warmup_teacher_temp 0.00004 --lr 0.0002 --warmup_epochs 10 --warmup_teacher_temp_epochs 199
+```
+
+### APPTAINER
+
+We are running on [ALCF Polaris](https://www.alcf.anl.gov/polaris) at [ALCF](https://www.alcf.anl.gov/), so we need to use `APPTAINER`.
+
+
+Again, before running the pre-training process for the 2k higher level, you need to run the following script to convert the features from the previous step into individual `.pt` files.
+
+First, launch the interactive session:
+
+```bash
+qsub -I -l select=1 -l filesystems=home:eagle:grand -l walltime=1:00:00 -q debug -A <Projectname>
+```
+
+Then load the required modules:
+
+```bash
+export HTTP_PROXY=http://proxy.alcf.anl.gov:3128
+export HTTPS_PROXY=http://proxy.alcf.anl.gov:3128
+export http_proxy=http://proxy.alcf.anl.gov:3128
+export https_proxy=http://proxy.alcf.anl.gov:3128
+ml use /soft/modulefiles
+ml load spack-pe-base/0.8.1
+ml load apptainer
+ml load e2fsprogs
+```
+
+Then, you need to launch the Apptainer shell with the following command:
+
+```bash
+apptainer shell -B /path/to/your/data:/data /path/to/the/container/satellite.sif
+```
+
+
+Then, go to the `dataset` directory:
+
+```bash
+cd gridrad/dataset/
+```
+
+Then run the following code in a `python` shell:
+
+```python
+import os
+import torch
+from pathlib import Path
+```
+
+```python
+# Load the features generated from the first layer in the hierarchy
+output_features_paht = '/path/to/your/data/SATELLITE/output_inference/output_features.pt'
+features = torch.load(output_features_paht)
+# output_dir is the path pointing to the folder in which the files will be saved
+# These files will be used for training the next layer in the hierarchy
+output_dir = '/path/to/your/data/SATELLITE/input_2k/'
+```
+
+```python
+# Just inspect on element of features (replace 'crop_30_0.pt' with an appropriate feature name)
+features['crop_30_0.pt'].shape
+```
+
+```python
+# This is the loop that generates the individual files per each element in features
+Path(output_dir).mkdir(parents=True, exist_ok=True)
+for i, (file_name, embedding) in enumerate(features.items()):
+    print(i)
+    print(file_name)
+    print(embedding.shape)
+    torch.save(embedding, os.path.join(output_dir, file_name))
+```
+
+```python
+# Now I am inspecting the output
+input_tensor = torch.load('/path/to/your/data/SATELLITE/input_2k/crop_30_0.pt')
+input_tensor.shape
+```
+
+```python
+# And this is the number of elements inside features
+len(features)
+```
+
+The same sequence on this script is in a `jupyter-notebook` in the `dataset` directory whose name is `Prepare_inputs_for_2k_upper_layer.ipynb`.
+
+
+Once the input for the 2k upper layer is ready, you can run the pre-training process.
+
+
+
+This is the script that we are using to launch the pre-training process for the 2k upper layer:
+
+```bash
+#!/bin/sh
+#PBS -l select=1:system=polaris
+#PBS -q debug
+#PBS -l place=scatter
+#PBS -l walltime=00:60:00
+#PBS -l filesystems=home:grand
+#PBS -A MultiActiveAI
+
+echo hostname
+hostname
+hostname
+hostname
+hostname
+
+export HTTP_PROXY=http://proxy.alcf.anl.gov:3128
+export HTTPS_PROXY=http://proxy.alcf.anl.gov:3128
+export http_proxy=http://proxy.alcf.anl.gov:3128
+export https_proxy=http://proxy.alcf.anl.gov:3128
+ml use /soft/modulefiles
+ml load spack-pe-base/0.8.1
+ml load apptainer
+ml load e2fsprogs
+
+export CONTAINER=/grand/MultiActiveAI/satellite.sif
+export DATA=/grand/MultiActiveAI/
+export WORKDIR=/home/demattie/gridrad/Hierarchical_Pretraining
+
+cd $WORKDIR
+apptainer exec --nv -B $DATA:/data $CONTAINER python -m torch.distributed.launch --nproc_per_node=4 main_dino2k.py --arch vit2k_xs --data_path /data/SATELLITE/input_2k/ --output_dir /data/SATELLITE/Checkpoints_2/ --epochs 200 --batch_size_per_gpu 16 --use_fp16 False --norm_last_layer False --teacher_temp 0.00008 --warmup_teacher_temp 0.00004 --lr 0.0002 --warmup_epochs 10 --warmup_teacher_temp_epochs 199
 ```
 
 
