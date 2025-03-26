@@ -499,8 +499,10 @@ def sanity_check_pt_files(
     flush_interval=50,
 ):
     # Ensure diagnosis file always exists (even if empty)
-    with open(diagnosis_file, 'w') as f:
-        pass
+    # Ensure diagnosis file exists without overwriting
+    if not os.path.exists(diagnosis_file):
+        with open(diagnosis_file, 'w') as f:
+            pass
 
     # List all .pt files in the directory
     files = [f for f in os.listdir(folder_path) if f.endswith('.pt')]
