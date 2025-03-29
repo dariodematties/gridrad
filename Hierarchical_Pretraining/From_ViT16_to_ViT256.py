@@ -276,7 +276,7 @@ def forward(x, model256, device256):
 
     # 3. [B x 384], where 384 == dim of ViT_256 [CLS] token
     features_cls256 = torch.vstack(features_cls256)
-    features_cls256 = features_cls256.reshape(batch_size, w_256, h_256, 384)
+    features_cls256 = features_cls256.reshape(batch_size, w_256, h_256, model256.embed_dim)
     # 4. [B x 384 x w_256 x h_256]
     features_cls256 = features_cls256.to('cpu')
     
